@@ -1,0 +1,15 @@
+sample	genome	wetland	timepoint	treatment
+metaG_T0	metaG	peat	T0	initial
+metaG_T1_anoxic	metaG	peat	T1	anoxic
+metaG_T2_anoxic	metaG	peat	T2	anoxic
+metaG_T3_anoxic	metaG	peat	T3	anoxic
+metaG_T4_anoxic	metaG	peat	T4	anoxic
+metaG_T1_oxic	metaG	peat	T1	oxic
+metaG_T2_oxic	metaG	peat	T2	oxic
+metaG_T3_oxic	metaG	peat	T3	oxic
+metaG_T4_oxic	metaG	peat	T4	oxic
+metaT_T0	metaT	peat	T0	initial
+metaT_T1_oxic	metaT	peat	T1	oxic
+metaT_T2_oxic	metaT	peat	T2	oxic
+metaT_T1_anoxic	metaT	peat	T1	anoxic
+metaT_T2_anoxic	metaT	peat	T2	anoxic

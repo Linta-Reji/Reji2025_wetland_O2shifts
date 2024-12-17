@@ -1,0 +1,448 @@
+
+# WETLAND METHANE: ANALYSIS OF GEOCHEMICAL DATA
+
+save.image(paste0(data.path, "/", "geochem_analysis_aug24.RData"))
+load(paste0(data.path, "/", "geochem_analysis_aug24.RData"))
+
+Load libraries:
+```{r, echo=FALSE, message=FALSE}
+library(tidyverse)
+library(ggfortify)
+library(ggbreak)
+library(cowplot)
+library(plotrix)
+```
+
+## Long term incubations: CH4, CO2, H2 data
+
+Read in data and preprocessing:
+```{r, echo=FALSE}
+data.path = paste0(dirname(getwd()), "/data")
+
+# load gas concentration data
+tcd = read.table(paste0(data.path, "/wetland_gasData.txt"), header=TRUE, sep="\t", check.names = FALSE)
+
+#setting factor levels
+tcd$Type= factor(tcd$Type, levels=c("Peat","Marsh","Saltmarsh"))
+
+# add new column with ppm scaled by dry weight for each gas species
+tcd = tcd %>% mutate(
+  CH4_ppm_DryWt = CH4_ppm/(dry_wt),
+  CO2_ppm_DryWt = CO2_ppm/(dry_wt),
+  H2_ppm_DryWt = H2_ppm/(dry_wt) )
+```
+
+Calculate mean and standard deviation for each gas species:
+```{r}
+# remove outliers
+# unusually high CO2 ppm in P3-T3 and S21-T3. set these to a small value 0.0001 to filter these out easily later.
+tcd$CO2_ppm[tcd$Days == 21 & tcd$Bottle == "P3"] = 0.0001
+tcd$CO2_ppm[tcd$Days == 21 & tcd$Bottle == "S21"] = 0.0001
+# calculate mean and standarad errors
+tcd_ed <- tcd %>%
+  select(Type, Treatment, Timecode, Days, dry_wt, CH4_ppm, CO2_ppm, H2_ppm) %>%
+  filter(CO2_ppm != 0.0001) %>%
+  group_by(Type, Treatment, Timecode, Days) %>%
+  mutate(avg_drywt = mean(dry_wt)) %>%
+  group_by(Type, Treatment, Timecode, Days, avg_drywt) %>%
+  summarise(mean_ch4ppm = mean(CH4_ppm/dry_wt), se_ch4ppm = std.error(CH4_ppm/dry_wt),
+            mean_co2ppm = mean(CO2_ppm/dry_wt), se_co2ppm = std.error(CO2_ppm/dry_wt),
+            mean_h2ppm = mean(H2_ppm/dry_wt), se_h2ppm = std.error(H2_ppm/dry_wt))
+
+
+# oxic to anoxic fold change in CO2 and 
+# anoxic to oxic fold change in CH4
+tcd_ed_wFC = tcd_ed %>% 
+  select(Type, Treatment, Timecode, Days, mean_ch4ppm, mean_co2ppm, se_ch4ppm, se_co2ppm) %>%
+  pivot_wider(names_from = Treatment, values_from = c(mean_ch4ppm, mean_co2ppm, se_ch4ppm, se_co2ppm)) %>%
+  mutate(oxic_anoxic_ch4_fc = (`mean_ch4ppm_Oxygen-shifted`/mean_ch4ppm_Anoxic),
+         oxic_anoxic_ch4_fc_se = sqrt( (se_ch4ppm_Anoxic/mean_ch4ppm_Anoxic)^2 +
+           (`se_ch4ppm_Oxygen-shifted`/(`mean_ch4ppm_Oxygen-shifted`+1))^2 ),
+         
+         oxic_anoxic_co2_fc = (`mean_co2ppm_Oxygen-shifted`/mean_co2ppm_Anoxic),
+         oxic_anoxic_co2_fc_se = sqrt( (se_co2ppm_Anoxic/mean_co2ppm_Anoxic)^2 +
+           (`se_co2ppm_Oxygen-shifted`/(`mean_co2ppm_Oxygen-shifted`))^2 )
+         )
+```
+
+
+### plot peat methane and co2 data
+```{r}
+colnames(tcd_ed)
+# FIGURE 1a, methane
+tcd_ed %>% 
+  filter(!Type %in% c("Marsh", "Saltmarsh")) %>%
+  select(-c(mean_co2ppm, se_co2ppm, mean_h2ppm, se_h2ppm)) %>%
+  ggplot(aes(fill=Treatment)) +
+  geom_rect(xmin=0, xmax=2.1, ymin=0, ymax=7e5, alpha=0.05, fill="gainsboro") +
+  geom_bar(aes(x=as.factor(Days), y=mean_ch4ppm), stat="identity", position = "dodge", color = "black") +
+  geom_errorbar(aes(x=as.factor(Days), ymin = mean_ch4ppm - se_ch4ppm, ymax = mean_ch4ppm + se_ch4ppm, width = 0.3), color="black", position = position_dodge(0.9)) +
+  facet_wrap(~Type, scales = "free_y") +
+  theme_linedraw() +
+  scale_fill_manual(values = c("#21908CFF", "#FDE725FF")) +
+  theme(strip.text = element_text(size=11),
+        legend.position = "bottom") +
+  xlab("Days in incubation") +
+  ylab((expression(CH[4]~"ppmv "~g^-1~"Drywt")))
+
+# FIGURE 1b, CO2
+tcd_ed %>% 
+  filter(!Type %in% c("Marsh", "Saltmarsh")) %>%
+  select(-c(mean_ch4ppm, se_ch4ppm, mean_h2ppm, se_h2ppm)) %>%
+  ggplot(aes(fill=Treatment)) +
+  geom_rect(xmin=0, xmax=2.1, ymin=0, ymax=7e5, alpha=0.05, fill="gainsboro") +
+  geom_bar(aes(x=as.factor(Days), y=mean_co2ppm), stat="identity", position = "dodge", color = "black") +
+  geom_errorbar(aes(x=as.factor(Days), ymin = mean_co2ppm - se_co2ppm, ymax = mean_co2ppm + se_co2ppm), width = 0.4, color="black", position = position_dodge(width = 0.9)) +
+  facet_wrap(~Type, scales = "free_y") +
+  theme_linedraw() +
+  scale_fill_manual(values = c("#21908CFF", "#FDE725FF")) +
+  theme(strip.text = element_text(size=11),
+        legend.position = "bottom") +
+  xlab("Days in incubation") +
+  ylab((expression(CO[2]~"ppmv "~g^-1~"Drywt")))
+
+```
+
+
+plot PB methane, CO2 and H2
+```{r}
+tcd_ed %>% 
+  filter(!Type %in% c("Marsh", "Saltmarsh")) %>% 
+  pivot_longer(cols=-c(Type, Treatment, Timecode, Days, avg_drywt), 
+               names_to = c(".value", "gas"), names_sep = "\\_") %>%
+  ggplot(aes(fill=Treatment)) +
+  geom_rect(xmin=0, xmax=2.5, ymin=0, ymax=7e6, alpha=0.05, fill="gainsboro") +
+  geom_bar(aes(x=as.factor(Days), y=mean), stat="identity", position = "dodge", color = "black") +
+  geom_errorbar(aes(x=as.factor(Days), ymin = mean-se, ymax = mean+se, width = 0.3), color="black", position = position_dodge(0.9)) +
+  facet_wrap(~gas, scales = "free_y") +
+  theme_linedraw() +
+  scale_fill_manual(values = c("#21908CFF", "#FDE725FF")) +
+  theme(strip.text = element_text(size=11),
+        legend.position = "bottom") +
+  xlab("Days in incubation") +
+  ylab((expression("ppmv "~g^-1~"Drywt")))
+  # ylab((expression(CH[4]~"ppmv "~g^-1~"Drywt")))
+```
+
+### plot PB anoxic:oxic fold changes
+```{r}
+tcd_ed_wFC %>% 
+    filter(!Type %in% c("Marsh", "Saltmarsh")) %>%
+  select(Type, Timecode, Days, oxic_anoxic_ch4_fc, oxic_anoxic_ch4_fc_se, oxic_anoxic_co2_fc, oxic_anoxic_co2_fc_se) %>%
+  rename(fc_ch4 = oxic_anoxic_ch4_fc, se_ch4 = oxic_anoxic_ch4_fc_se, fc_co2 =  oxic_anoxic_co2_fc, se_co2 = oxic_anoxic_co2_fc_se) %>%
+  pivot_longer(cols=-c(Type, Timecode, Days), 
+               names_to = c(".value", "gas"), names_sep = "\\_") %>%
+  ggplot(aes(x=as.factor(Days), y=fc)) +
+  geom_rect(xmin=0, xmax=2.5, ymin=-4, ymax=20, alpha=0.05) +
+  geom_point() +
+  geom_hline(yintercept = 1) +
+  geom_errorbar(aes(ymin = fc - se, ymax = fc + se, width = 0.25), color="black") +
+  facet_wrap(.~gas) +
+  theme_linedraw() +
+  theme(strip.text = element_text(size=11)) +
+  xlab("Days in incubation") +
+  ylab("Fold change \n Oxygen-shifted:Anoxic")
+  
+```
+
+
+## Peat incubations with a longer oxic period
+
+Read in data:
+```{r, echo=FALSE}
+tcd.long = read.table(paste0(data.path, "/wetland_gasData_longerO2.txt"), header=TRUE, sep="\t", check.names = FALSE)
+
+# adjusting column names to be consistent with the previous dataset
+tcd.long = tcd.long %>%
+  mutate(Treatment = replace(Treatment, Treatment == "oxic", "Oxygen-shifted"),
+         Treatment = replace(Treatment, Treatment == "anoxic", "Anoxic"))
+```
+
+Calculate mean and standard deviation for each gas species:
+```{r}
+# mean and std deviations
+tcd.long_ed <- tcd.long %>%
+  group_by(Treatment, Timepoint, Days) %>%
+  summarise(mean_ch4ppm = mean(CH4_ppm), sd_ch4ppm = std.error(CH4_ppm),
+            mean_co2ppm = mean(CO2_ppm), sd_co2ppm = std.error(CO2_ppm),
+            mean_h2ppm = mean(H2_ppm), sd_h2ppm = std.error(H2_ppm))
+
+# compute fold changes
+# ch4:co2 fold change by timepoint
+tcd.long_ed <- tcd.long_ed %>%
+  group_by(Treatment, Timepoint, Days) %>%
+  mutate(CH4_CO2_FC = (mean_ch4ppm-mean_co2ppm)/mean_co2ppm,
+         sd_ch4_co2 = sqrt((sd_ch4ppm/mean_ch4ppm)^2 + (sd_co2ppm/mean_co2ppm)^2))
+
+
+# oxic to anoxic fold change in CH4 and CO2
+tcd.long_ed_wFC = tcd.long_ed %>% 
+  select(Treatment, Timepoint, mean_ch4ppm, mean_co2ppm, mean_h2ppm, sd_ch4ppm, sd_co2ppm, sd_h2ppm) %>%
+  pivot_wider(names_from = Treatment, values_from = c(mean_ch4ppm, mean_co2ppm, mean_h2ppm, sd_ch4ppm, sd_co2ppm, sd_h2ppm)) %>%
+  mutate(anoxic_oxic_ch4_fc = ifelse(`mean_ch4ppm_Oxygen-shifted` > 0, (mean_ch4ppm_Anoxic/`mean_ch4ppm_Oxygen-shifted`)-1, (mean_ch4ppm_Anoxic/(`mean_ch4ppm_Oxygen-shifted`+ 0.1))-1 ),
+         anoxic_oxic_ch4_fc_sd = sqrt( (sd_ch4ppm_Anoxic/mean_ch4ppm_Anoxic)^2 +
+           (`sd_ch4ppm_Oxygen-shifted`/(`mean_ch4ppm_Oxygen-shifted`+0.1))^2 ),
+         anoxic_oxic_co2_fc = ifelse(`mean_co2ppm_Oxygen-shifted` > 0, (mean_co2ppm_Anoxic/`mean_co2ppm_Oxygen-shifted`)-1, (mean_co2ppm_Anoxic/(`mean_co2ppm_Oxygen-shifted`+ 0.1))-1 ),
+         anoxic_oxic_co2_fc_sd = sqrt( (sd_co2ppm_Anoxic/mean_co2ppm_Anoxic)^2 +
+           (`sd_co2ppm_Oxygen-shifted`/(`mean_co2ppm_Oxygen-shifted`+0.1))^2 )
+         )
+
+```
+
+### plot CH4, co2, h2
+### FIGURE S1
+```{r}
+## Figure S1
+# CH4
+tcd.long_ed %>%
+  ggplot(aes(x=Days, y=mean_ch4ppm, fill=Treatment)) +
+  geom_rect(xmin=0, xmax=30, ymin=0, ymax=48000, alpha=0.05, fill="gainsboro") +
+  geom_bar(stat="identity", position = "dodge", color = "black") +
+  geom_errorbar(aes(ymin = mean_ch4ppm - sd_ch4ppm, ymax = mean_ch4ppm + sd_ch4ppm, width = 2), color="black", position = position_dodge(5)) +
+  theme_linedraw() +
+  scale_fill_manual(values = c("#21908CFF", "#FDE725FF")) +
+  ylab(expression(CH[4]~"ppmv"))
+
+# CO2
+tcd.long_ed %>%
+  ggplot(aes(x=Days, y=mean_co2ppm, fill=Treatment)) +
+  geom_rect(xmin=0, xmax=30, ymin=0, ymax=125000, alpha=0.05, fill="gainsboro") +
+  geom_bar(stat="identity", color = "black") +
+  geom_errorbar(aes(ymin = mean_co2ppm - sd_co2ppm, ymax = mean_co2ppm + sd_co2ppm, width = 0.5), color="black") +
+  facet_grid(~Treatment) +
+  theme_linedraw() +
+  scale_fill_manual(values = c("#21908CFF", "#FDE725FF")) +
+  ylab(expression(CO[2]~"ppmv"))
+
+# H2
+tcd.long_ed %>%
+  ggplot(aes(x=Days, y=mean_h2ppm, fill=Treatment)) +
+  geom_rect(xmin=0, xmax=30, ymin=0, ymax=21, alpha=0.05, fill="gainsboro") +
+  geom_bar(stat="identity") +
+  geom_errorbar(aes(ymin = mean_h2ppm - sd_h2ppm, ymax = mean_h2ppm + sd_h2ppm, width = 0.2), color="black") +
+  facet_grid(~Treatment) +
+  theme_linedraw() +
+  scale_fill_manual(values = c("#21908CFF", "#FDE725FF")) +
+  ylab(expression(H[2]~"ppmv"))
+```
+
+
+## plot Wilmoth et al. gas data for comparison with PB peat
+
+```{r}
+# load gas concentration data
+gas.jw = read.table(paste0(data.path, "/jw_gasEvln.txt"), header=TRUE, sep="\t", check.names = FALSE)
+(gas.jw)
+
+gas.jw %>%
+  drop_na() %>%
+  filter(gas_species == "h2") %>%
+  ggplot(aes(x=as.factor(days), y=ppmv,fill=oxy_tr)) +
+  # geom_rect(xmin=0, xmax=2.5, ymin=0, ymax=20e7, alpha=0.04, fill="gainsboro") +
+  geom_bar(stat="identity", color="black") +
+  geom_errorbar(aes(ymin = ppmv - se, ymax = ppmv + se, width = 0.2), color="black") +
+  facet_grid(~oxy_tr, scales = "free") +
+  scale_fill_manual(values = c("#21908CFF", "#FDE725FF")) +
+  theme_linedraw() +
+  xlab("Days in incubation")
+```
+
+### Wilmoth data: oxic to anoxic fold change in CH4 and CO2
+Fig. 1c
+```{r}
+colnames(gas.jw)
+gas.jw_wFC = gas.jw %>% 
+  pivot_wider(names_from = oxy_tr, values_from = c(ppmv, se)) %>%
+  mutate(oxic_anoxic_fc = ppmv_10perc/ppmv_0perc,
+         oxic_anoxic_fc_se = sqrt( (se_10perc/ppmv_10perc)^2 + (se_0perc/(se_0perc+1))^2 )
+         )
+colnames(gas.jw_wFC)
+# plot fold chnages
+gas.jw_wFC %>%
+  filter(gas_species != "h2") %>%
+  ggplot(aes(x=as.factor(days), y=oxic_anoxic_fc)) +
+  geom_rect(xmin=0, xmax=2, ymin=0, ymax=7e5, alpha=0.05) +
+  geom_point() +
+  geom_hline(yintercept = 0) +
+  geom_errorbar(aes(ymin = oxic_anoxic_fc - oxic_anoxic_fc_se, ymax = oxic_anoxic_fc + oxic_anoxic_fc_se, width = 0.2), color="black") +
+    facet_wrap(.~gas_species, scales = "free_y") +
+  theme_linedraw()  +
+  xlab("Days in incubation") +
+  ylab("Fold change \n Oxygen-shifted:Anoxic")
+```
+
+
+## plot FW marsh and saltmarsh gas data:
+```{r}
+
+tcd_ed %>% 
+  filter(Type %in% c("Marsh", "Saltmarsh")) %>% 
+  pivot_longer(cols=-c(Type, Treatment, Timecode, Days, avg_drywt), 
+               names_to = c(".value", "gas"), names_sep = "\\_") %>%
+  ggplot(aes(fill=Treatment)) +
+  geom_rect(xmin=0, xmax=2.5, ymin=0, ymax=7e6, alpha=0.05, fill="gainsboro") +
+  geom_bar(aes(x=as.factor(Days), y=mean), stat="identity", position = "dodge", color = "black") +
+  geom_errorbar(aes(x=as.factor(Days), ymin = mean-se, ymax = mean+se, width = 0.3), color="black", position = position_dodge(0.9)) +
+  facet_wrap(Type~gas, scales = "free_y") +
+  theme_linedraw() +
+  scale_fill_manual(values = c("#21908CFF", "#FDE725FF")) +
+  theme(strip.text = element_text(size=11),
+        legend.position = "bottom") +
+  xlab("Days in incubation") +
+  ylab((expression("ppmv "~g^-1~"Drywt")))
+```
+
+
+
+
+## Analysis of other geochemical data (Non-gaseous species)
+
+Read in data:
+```{r, echo=FALSE}
+geo = read.table(paste0(data.path, "/wetland_geochemData.txt"), header=TRUE, sep="\t", check.names = FALSE)
+geo$Type= factor(geo$Type, levels=c("Peat","Marsh","Saltmarsh"))
+colnames(geo)
+```
+
+Fix the data to add detection limits and replace NAs with mean values:
+```{r}
+# NO2 detection limit = 0.022 ug/ml; NO3 detection limit 0.106 ug/ml
+# replace BDL in geo with the corresponding detection limits-0.001
+geo.ed = geo %>%
+  mutate(NO2_N = as.numeric(replace(NO2_N, NO2_N == "BDL", 0.021)),
+         NO3_N = as.numeric(replace(NO3_N, NO3_N == "BDL", 0.105)))
+
+# how many NAs?
+apply(X = is.na(geo.ed), MARGIN = 2, FUN = sum)
+
+# replace NA by group mean
+geo.ed2 = geo.ed %>% 
+  group_by(Type, Treatment, Timepoint) %>%
+  mutate( Phenolics_mg_ml  = ifelse(is.na(Phenolics_mg_ml), mean(Phenolics_mg_ml, na.rm = T), Phenolics_mg_ml),
+          C_N = ifelse(is.na(C_N), mean(C_N, na.rm = T), C_N),
+          NO2_N = ifelse(is.na(NO2_N), mean(NO2_N, na.rm = T), NO2_N),
+          NO3_N = ifelse(is.na(NO3_N), mean(NO3_N, na.rm = T), NO3_N),
+          SO4_S = ifelse(is.na(SO4_S), mean(SO4_S, na.rm = T), SO4_S),
+          )
+geo.ed2 = as_tibble(geo.ed2)
+```
+
+
+### Temporal plots of geochem variables
+### FIGURE 2a
+```{r}
+geo.ed2$Treatment = factor(geo.ed2$Treatment, levels = c("Init", "Anoxic", "Oxygen-shifted"))
+geo.ed2 = geo.ed2 %>%
+  mutate(Days = case_when(Timepoint == "T0" ~ 0,
+                          Timepoint == "T2" ~ 7,
+                          Timepoint == "T3" ~ 21,
+                          Timepoint == "T8" ~ 229,
+                          Timepoint == "T9" ~ 365))
+# convert ug/ml values to uM
+geo.ed2$SO4_S_uM = ((geo.ed2$SO4_S)/96.06)*1000
+geo.ed2$NO3_N_uM = ((geo.ed2$NO3_N)/62.0049)*1000
+geo.ed2$NO2_N_uM = ((geo.ed2$NO2_N)/46.005)*1000
+geo.ed2 %>% select(NO2_N, NO2_N_uM)
+
+# main plot; Fig. 2a
+geo.ed2 %>% filter(Type == "Peat") %>%
+  pivot_longer(cols = -c(Bottle, Type, Treatment, Timepoint, Days), names_to = "variable", values_to = "measurements") %>%
+  filter(variable %in% c("pH", "Fe_II_uM", "SO4_S_uM", "Phenolics_mg_ml")) %>% drop_na() %>%
+  mutate(variable = factor(variable, levels = c("pH", "Fe_II_uM", "SO4_S_uM", "Phenolics_mg_ml"))) %>%
+  ggplot(aes(x=as.factor(Days), y=measurements)) +
+  geom_rect(xmin=0, xmax=2.5, ymin=0, ymax=150, alpha=0.03, fill="gainsboro") +
+  geom_boxplot(aes(fill=Treatment)) +
+  geom_point(aes(fill = Treatment), pch=21, position = position_jitterdodge()) +
+  scale_fill_viridis_d() +
+  scale_color_viridis_d() +
+  facet_wrap(~variable, scales = "free_y") +
+  theme_bw() +
+  theme(axis.title.y = element_blank(), legend.position = "bottom", text=element_text(size=14)) +
+  xlab("Days in incubation")
+
+# marsh and saltmarsh
+geo.ed2 %>% filter(Type != "Peat") %>%
+  pivot_longer(cols = -c(Bottle, Type, Treatment, Timepoint, Days), names_to = "variable", values_to = "measurements") %>%
+  filter(variable %in% c("pH", "Fe_II_uM", "SO4_S_uM", "Phenolics_mg_ml")) %>%
+  ggplot(aes(x=as.factor(Days), y=measurements)) +
+  geom_boxplot(aes(fill=Treatment)) +
+  geom_point(aes(fill = Treatment), pch=21, position = position_jitterdodge()) +
+  scale_fill_viridis_d() +
+  scale_color_viridis_d() +
+  facet_wrap(Type~variable, scales = "free", ncol=4) +
+  theme_bw() +
+  theme(axis.title.y = element_blank(), legend.position = "bottom", text=element_text(size=14)) +
+  xlab("Days in incubation")
+
+# plot nitrate, nitrite
+geo.ed2 %>% filter(Type == "Saltmarsh") %>%
+  pivot_longer(cols = -c(Bottle, Type, Treatment, Timepoint, Days), names_to = "variable", values_to = "measurements") %>%
+  filter(variable %in% c("NO3_N_uM")) %>%
+  ggplot(aes(x=as.factor(Days), y=measurements)) +
+  geom_point(aes(fill = Treatment), pch=21, position = position_jitterdodge()) +
+  scale_y_break(c(4,10))
+```
+
+### t.test
+```{r}
+# test if a given variable is significantly different between treatments at each timepoint.
+geo.ed2 %>% filter(Type == "Peat") %>%
+  select(Treatment, Timepoint, pH) %>%
+  filter(Treatment != "Init") %>%
+  drop_na() %>%
+  group_by(Timepoint) %>%
+  group_map(~ t.test(.x$pH[.x$Treatment == "Oxygen-shifted"], .x$pH[.x$Treatment == "Anoxic"], paired = TRUE))
+# Fe_II_uM: Timepoint 1 significant; t = 16.978, df = 2, p-value = 0.003451
+# SO4-S: Timepoint 1 significant: t = -27.921, df = 2, p-value = 0.00128
+# pH: Timepoint 1 significant: t = 20.3, df = 2, p-value = 0.002418
+```
+
+
+### PCAs on geochemical data
+### FIGURE 2b
+
+```{r}
+# filter out variables with missing values
+
+# SO4 data not available for saltmarsh T0 samples.
+# permute with mean(SO4) of anoxic T2 samples
+sm_t2_meanSO4 = geo.ed2 %>% filter(Type == "Saltmarsh", Treatment == "Anoxic", Timepoint == "T2") %>% summarise(mean_SO4 = mean(SO4_S_uM, na.rm = TRUE)) %>% pull(mean_SO4)
+
+geo.ed3 = geo.ed2 %>%
+  mutate(SO4_S_uM = ifelse(is.na(SO4_S_uM) & Type == "Saltmarsh" & Treatment == "Init", sm_t2_meanSO4, SO4_S_uM))
+
+geo.ed3 %>% filter(Type == "Saltmarsh" & Treatment == "Init") %>% select(SO4_S_uM)
+  
+
+# fix LOI values (for peat, the almost 100% matter loss upon combustion makes weight comparisons difficult.)
+
+geo.sel = geo.ed3 %>%
+  select(-c(C_N, DryWeight_g, total_DryWt_g, Days, NO2_N, NO3_N, NO2_N_uM, NO3_N_uM, SO4_S)) %>%
+  drop_na() %>%
+  mutate(LOI_OM_perc = replace(LOI_OM_perc, LOI_OM_perc > 100, 100))
+
+# change factor level for treatment
+geo.sel$Treatment = factor(geo.sel$Treatment, levels = c("Init", "Anoxic", "Oxygen-shifted"))
+
+# pca
+geo.sel.pca = geo.sel %>% ungroup() %>%
+  select_if(is.numeric) %>%
+  prcomp(scale=TRUE)
+
+# shape by Treatment
+autoplot(geo.sel.pca, data = geo.sel, shape = "Treatment", color="Timepoint", fill="Timepoint", loadings = TRUE,loadings.label = TRUE, size=4, loadings.label.colour = "#070604", loadings.colour = "#070604") + 
+  coord_fixed(ratio=0.67) +
+  scale_shape_manual(values=c(21,22,23)) +
+  scale_color_manual(values = c("deepskyblue4", "darkslategray3", "goldenrod1", "hotpink3", "maroon4")) +
+  scale_fill_manual(values = c("deepskyblue4", "darkslategray3", "goldenrod1", "hotpink3", "maroon4")) + 
+  theme_minimal()
+
+# shape by wetland Type
+autoplot(geo.sel.pca, data = geo.sel, shape = "Type", color="Timepoint", fill="Timepoint", loadings = TRUE,loadings.label = TRUE, size=4, loadings.label.colour = "#070604", loadings.colour = "#070604") + 
+  coord_fixed(ratio=0.67) +
+  scale_shape_manual(values=c(21,22,23)) +
+  scale_color_manual(values = c("deepskyblue4", "darkslategray3", "goldenrod1", "hotpink3", "maroon4")) +
+  scale_fill_manual(values = c("deepskyblue4", "darkslategray3", "goldenrod1", "hotpink3", "maroon4")) + 
+  theme_minimal()
+
+```

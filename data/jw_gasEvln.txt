@@ -1,0 +1,31 @@
+gas_species	sample	oxy_tr	timepoint	days	ppmv	se
+ch4	all_layers	10perc	T1	21	0	NA
+ch4	all_layers	10perc	T2	98	0	NA
+ch4	all_layers	10perc	T3	126	0	NA
+ch4	all_layers	10perc	T4	198	1271.35	340.97
+ch4	all_layers	10perc	T5	232	4320.05	1266.09
+co2	all_layers	10perc	T1	21	5263.53	716.97
+co2	all_layers	10perc	T2	98	NA	NA
+co2	all_layers	10perc	T3	126	7470.64	1548.21
+co2	all_layers	10perc	T4	198	NA	NA
+co2	all_layers	10perc	T5	232	9582.71	2703.93
+h2	all_layers	10perc	T1	21	1126.72	20.62
+h2	all_layers	10perc	T2	98		
+h2	all_layers	10perc	T3	126	58.88	19.57
+h2	all_layers	10perc	T4	198		
+h2	all_layers	10perc	T5	232	266.55	191.43
+ch4	all_layers	0perc	T1	21	0	NA
+ch4	all_layers	0perc	T2	98	0	NA
+ch4	all_layers	0perc	T3	126	0	NA
+ch4	all_layers	0perc	T4	198	2.31	0.62
+ch4	all_layers	0perc	T5	232	4.09	0.78
+co2	all_layers	0perc	T1	21	1484.73	1017.7
+co2	all_layers	0perc	T2	98	NA	NA
+co2	all_layers	0perc	T3	126	47.28	41.88
+co2	all_layers	0perc	T4	198	NA	NA
+co2	all_layers	0perc	T5	232	496.25	226.02
+h2	all_layers	0perc	T1	21	767.58	228.59
+h2	all_layers	0perc	T2	98	NA	NA
+h2	all_layers	0perc	T3	126	2166.4	510.14
+h2	all_layers	0perc	T4	198	NA	NA
+h2	all_layers	0perc	T5	232	1423.06	448.18

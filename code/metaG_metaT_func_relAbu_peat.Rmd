@@ -1,0 +1,355 @@
+---
+title: "peat_metaG_geneRelAbu"
+author: "Linta Reji"
+date: "2024-01-02"
+output: html_document
+---
+
+Load libraries:
+```{r, echo=FALSE, message=FALSE}
+library(tidyverse)
+```
+
+```{r}
+data.path = paste0(dirname(getwd()), "/data")
+```
+
+
+# PEAT 
+
+Read in data.
+Concatenate anvio summary output files to retain just enough info for calculating gene relative abundances.
+
+```{r}
+gene.calls <- read.table(paste0(data.path, "/peat_gene_calls.txt"), header=TRUE, sep="\t")
+
+gene.coverages <- read.table(paste0(data.path, "/peat_allContigs-gene_coverages.txt"), header=TRUE, sep="\t")
+
+tot.read.counts = data.frame("sample" = c("P_anoxic_T1", "P_anoxic_T2", "P_anoxic_T3", "P_anoxic_T4", "P_oxic_T0", "P_oxic_T1", "P_oxic_T2", "P_oxic_T3", "P_oxic_T4", "peat_T0_metaT", "peat_anoxic_T1_metaT", "peat_anoxic_T2_metaT", "peat_oxic_T1_metaT", "peat_oxic_T2_metaT"), "tot_reads" = c(214218338,	177637972, 114149480, 129646232, 104257112, 113095808, 104527250, 146728050, 136557132, 173381458, 161406064, 197889318, 151059348, 193424754))
+```
+
+
+Calculate gene lengths:
+```{r}
+gene_summary = data.frame("gene_ids" = gene.calls[,1])
+gene_summary$gene_length = gene.calls$stop - gene.calls$start
+
+# sanity check
+nrow(gene_summary) == nrow(gene.calls)
+
+# now delete gene.calls
+rm(gene.calls)
+```
+
+Calculate the number of reads mapping to each gene:
+```{r}
+# definition of coverage in anvio-summary explained here: https://merenlab.org/2017/05/08/anvio-views/#mean-coverage
+
+# reads mapping to a gene = gene length x coverage
+head(gene.coverages)
+head(gene_summary)
+
+head(data.frame(gene_summary$gene_ids, "reads_mapped" = gene_summary$gene_length * gene.coverages$P_anoxic_T1_profile))
+
+# multiply each coverage value for each sample with the gene length. 
+reads_mapped_toGene = gene.coverages %>% 
+  mutate_each(funs(.*gene_summary$gene_length), starts_with("P"))
+
+reads_mapped_toGene = gene.coverages %>%
+  select(gene_callers_id, starts_with("P", ignore.case = FALSE)) %>%
+  mutate(across(starts_with("P"), ~.*gene_summary$gene_length))
+
+reads_mapped_toTranscripts = gene.coverages %>%
+  select(gene_callers_id, contains("metaT", ignore.case = FALSE)) %>%
+  mutate(across(contains("metaT"), ~.*gene_summary$gene_length))
+head(reads_mapped_toTranscripts)
+```
+
+Calculate relative abundances (reads mapped/million total reads)
+```{r}
+# extract metaG read counts from tot.read.counts
+gene.read.counts = tot.read.counts %>%
+  filter(str_detect(sample, "P")) %>%
+  mutate(tot_readsMillion = round(tot_reads/10^6, 2), )
+
+# extract metaT read counts from tot.read.counts
+tr.read.counts = tot.read.counts %>%
+  filter(str_detect(sample, "metaT")) %>%
+  mutate(tot_readsMillion = round(tot_reads/10^6, 2), )
+
+# divide each gene/transcript coverage by total read counts in million
+## metaG
+gene.rel.abu = mapply("/", reads_mapped_toGene[,2:10], gene.read.counts$tot_readsMillion) %>% as_tibble()
+## metaT
+tr.rel.abu = mapply("/", reads_mapped_toTranscripts[,2:6], tr.read.counts$tot_readsMillion) %>% as_tibble()
+
+# combine the above tibble with gene ids, and remove those with zero counts
+## metaG
+gene.rel.abu.dat = data.frame("gene_ids" = reads_mapped_toGene$gene_callers_id, gene.rel.abu) %>%
+  filter(rowSums(select(., -gene_ids)) > 0) %>%
+  mutate(across(starts_with("P"), ~round(.,2)))
+head(gene.rel.abu.dat) # 2105812      10
+
+
+## metaT
+tr.rel.abu.dat = data.frame("gene_ids" = reads_mapped_toTranscripts$gene_callers_id, tr.rel.abu) %>% filter(rowSums(select(., -gene_ids)) > 0) %>%
+  mutate(across(contains("metaT"), ~round(.,2)))
+dim(tr.rel.abu.dat) # 542933      6
+```
+
+
+#####################################################
+
+
+# Alternate way of TPM calculations
+## TPM Transcripts
+
+```{r}
+# 1. rpk = total read counts in a sample/length of gene in kb
+## add transcript lengths to the df with tr IDs and total reads mapped to each
+reads_mapped_toTranscripts$gene_length = gene_summary$gene_length
+
+## calculate RPK by dividing reads mapped by length of gene in Kb
+tr_rpk = reads_mapped_toTranscripts %>%
+  mutate(across(starts_with('peat'), ~./(gene_length/1000)))
+
+# 2. Calculate the "per million" scaling factor: count up all the RPK values in a sample and divide this number by 1,000,000.
+tr_rpk_perMil = tr_rpk %>%
+  select(-c(gene_length, gene_callers_id)) %>%
+  colSums()/10^6
+
+# 3. Calculate TPM: Divide RPK values by the "per million" scaling factor
+tr_tpm = tr_rpk %>% 
+  select(starts_with("peat")) %>%
+  filter(rowSums(across(where(is.numeric)))!=0) %>%
+  sweep(., 2, tr_rpk_perMil, FUN = "/")
+
+dim(tr_tpm) # 542933 
+
+# extract final tr IDs
+final_tr_ids = tr_rpk %>% filter(rowSums(across(starts_with("peat")))!=0) %>% select(gene_callers_id) %>% unlist()
+
+# add tr IDs to tr_tpm
+tr_tpm$gene_ids = final_tr_ids
+```
+
+## TPM genes
+
+```{r}
+# 1. rpk = total read counts in a sample/length of gene in kb
+## add gene lengths to the df with tr IDs and total reads mapped to each
+reads_mapped_toGene$gene_length = gene_summary$gene_length
+
+## calculate RPK by dividing reads mapped by length of gene in Kb
+gene_rpk = reads_mapped_toGene %>%
+  mutate(across(starts_with('P'), ~./(gene_length/1000)))
+
+# 2. Calculate the "per million" scaling factor: count up all the RPK values in a sample and divide this number by 1,000,000.
+gene_rpk_perMil = gene_rpk %>%
+  select(-c(gene_length, gene_callers_id)) %>%
+  colSums()/10^6
+
+# 3. Calculate TPM: Divide RPK values by the "per million" scaling factor
+gene_tpm = gene_rpk %>% 
+  select(starts_with("P")) %>%
+  filter(rowSums(across(where(is.numeric)))!=0) %>%
+  sweep(., 2, gene_rpk_perMil, FUN = "/")
+
+# extract final gene IDs
+final_gene_ids = gene_rpk %>% filter(rowSums(across(starts_with("P")))!=0) %>% select(gene_callers_id) %>% unlist()
+
+# add gene IDs to gene_tpm
+gene_tpm$gene_ids = final_gene_ids
+```
+
+
+# Peat select functions: relative distritubions
+
+Read in file with select functions and add function names.
+```{r}
+# read in txt file with select functions:
+list.files(data.path)
+peat.sel.fun = read.table(paste0(data.path, "/select_fun.txt"), sep = "\t", header = TRUE)
+colnames(peat.sel.fun) = c("gene_ids", "KO")
+
+peat.sel.fun = peat.sel.fun %>%
+  mutate(Function = case_when(KO == "K03380" ~ "Phenol hydroxylase",
+                              KO == "K03381" ~ "Catechol 1,2-dioxygenase",
+                              KO == "K01190" ~ "beta-galactosidase lacZ",
+                              KO == "K12308" ~ "beta-galactosidase lacA",
+                              KO == "K12309" ~ "beta-galactosidase GLB1",
+                              KO == "K00399" ~ "McrA",
+                              KO == "K11180" ~ "DsrA",
+                              KO == "K11181" ~ "DsrB"))
+
+sel_gene_ids = peat.sel.fun$gene_ids
+
+```
+
+pull out select functions from the metaG and metaT gene TPM values:
+
+### metagenomes TPM
+```{r}
+
+# combine select functions with metaG TPMs
+peat.sel.fun.genes = peat.sel.fun %>% 
+  left_join(gene_tpm, by = "gene_ids")
+levels(factor(peat.sel.fun.genes$KO))
+# heatmap (tiles)
+peat.sel.fun.genes %>%
+  filter(!KO %in% c("K01190", "K12308")) %>%
+  pivot_longer(cols = -c(gene_ids, KO, Function), 
+               names_to = "metagenome", values_to = "TPM") %>%
+  select(KO, Function, TPM, metagenome) %>%
+  group_by(KO, Function, metagenome) %>% 
+  summarise(Mean_TPM=mean(TPM)) %>%
+  mutate(metagenome = factor(metagenome, levels = c("P_oxic_T0_profile", "P_oxic_T1_profile", "P_oxic_T2_profile", "P_oxic_T3_profile", "P_oxic_T4_profile", "P_anoxic_T1_profile", "P_anoxic_T2_profile", "P_anoxic_T3_profile", "P_anoxic_T4_profile"))) %>%
+  ggplot(aes(x=Function, y=metagenome, fill=Mean_TPM)) +
+  geom_tile() +
+  scale_fill_gradientn(colors = c("#e1e8fa","#cc4e38","#3c211c"),
+                       breaks = c(1,2,3,4)) +
+  coord_flip() +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle=90, vjust=0.5)) +
+  geom_hline(yintercept = c(1.5, 5.5))
+
+```
+
+### metagenomes reads mapped per million reads
+## Figure 4a (new figure 3b)
+```{r}
+
+# combine select functions with metaG gene rel abundances
+peat.sel.fun.genes.rel = peat.sel.fun %>% 
+  left_join(gene.rel.abu.dat, by = "gene_ids")
+levels(factor(peat.sel.fun.genes.rel$KO))
+
+peat.sel.fun.genes.rel$Function = factor(peat.sel.fun.genes.rel$Function, levels = rev(c("McrA", "DsrA", "DsrB", "Phenol hydroxylase", "Catechol 1,2-dioxygenase")))
+# heatmap (tiles)
+peat.sel.fun.genes.rel %>%
+  filter(!KO %in% c("K01190", "K12308")) %>%
+  pivot_longer(cols = -c(gene_ids, KO, Function), 
+               names_to = "metagenome", values_to = "ReadsMapped_millReads") %>%
+  select(KO, Function, ReadsMapped_millReads, metagenome) %>%
+  group_by(KO, Function, metagenome) %>% 
+  summarise(Mean_ReadsMapped_millReads=mean(ReadsMapped_millReads)) %>%
+  mutate(metagenome = factor(metagenome, levels = c("P_oxic_T0_profile", "P_oxic_T1_profile", "P_oxic_T2_profile", "P_oxic_T3_profile", "P_oxic_T4_profile", "P_anoxic_T1_profile", "P_anoxic_T2_profile", "P_anoxic_T3_profile", "P_anoxic_T4_profile"))) %>%
+  ggplot(aes(x=Function, y=metagenome, fill=Mean_ReadsMapped_millReads)) +
+  geom_tile() +
+  scale_fill_gradientn(colors = c("#e1e8fa","#cc4e38","#3c211c"),
+                       breaks = c(50,100,150,200,250,300)) +
+  coord_flip() +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle=90, vjust=0.5)) +
+  geom_hline(yintercept = c(1.5, 5.5))
+
+```
+
+
+### metatranscriptomes TPM
+```{r}
+# combine select functions with metaT TPMs
+peat.sel.fun.trs = peat.sel.fun %>% 
+  left_join(tr_tpm, by = "gene_ids")
+
+dim(peat.sel.fun.trs)
+
+peat.sel.fun.trs.long = peat.sel.fun.trs %>% 
+  pivot_longer(cols = -c(gene_ids, KO, Function), 
+               names_to = "metatranscriptome", values_to = "TPM")
+
+# order functions
+peat.sel.fun.trs.long$Function = factor(peat.sel.fun.trs.long$Function, levels = c("Phenol hydroxylase", "Catechol 1,2-dioxygenase", "DsrA", "DsrB", "McrA"))
+# heatmap (tiles)
+peat.sel.fun.trs.long %>%
+  filter(!KO %in% c("K01190", "K12308")) %>% drop_na() %>%
+  select(KO, Function, TPM, metatranscriptome) %>%
+  group_by(KO, Function, metatranscriptome) %>% 
+  summarise(Mean_TPM=mean(TPM)) %>%
+  mutate(metatranscriptome = factor(metatranscriptome, levels = c("peat_T0_metaT_profile", "peat_oxic_T1_metaT_profile", "peat_oxic_T2_metaT_profile", "peat_anoxic_T1_metaT_profile", "peat_anoxic_T2_metaT_profile"))) %>%
+  ggplot(aes(x=Function, y=metatranscriptome, fill=Mean_TPM)) +
+  geom_tile() +
+  scale_fill_gradientn(colors = c("#e1e8fa","#cc4e38","#3c211c"),
+                       breaks = c(1,2,3,4)) +
+  coord_flip() +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle=90, vjust=0.5, hjust=1)) +
+  geom_hline(yintercept = c(1.5, 3.5))
+```
+
+
+### metatranscriptomes reads mapped per million reads
+## Figure 4b (new figure 3c)
+```{r}
+# combine select functions with metaT reads/million reads
+peat.sel.fun.trs.rel = peat.sel.fun %>% 
+  left_join(tr.rel.abu.dat, by = "gene_ids")
+
+
+peat.sel.fun.trs.long = peat.sel.fun.trs.rel %>% 
+  pivot_longer(cols = -c(gene_ids, KO, Function), 
+               names_to = "metatranscriptome", values_to = "Reads mapped/Million reads")
+
+# order functions
+peat.sel.fun.trs.long$Function = factor(peat.sel.fun.trs.long$Function, levels = c("Phenol hydroxylase", "Catechol 1,2-dioxygenase", "DsrB", "DsrA", "McrA"))
+
+# heatmap (tiles)
+peat.sel.fun.trs.long %>%
+  filter(!KO %in% c("K01190", "K12308")) %>% drop_na() %>%
+  select(KO, Function, `Reads mapped/Million reads`, metatranscriptome) %>%
+  group_by(KO, Function, metatranscriptome) %>% 
+  summarise(Mean_ReadsMappedPerMillionReads=mean(`Reads mapped/Million reads`)) %>%
+  mutate(metatranscriptome = factor(metatranscriptome, levels = c("peat_T0_metaT_profile", "peat_oxic_T1_metaT_profile", "peat_oxic_T2_metaT_profile", "peat_anoxic_T1_metaT_profile", "peat_anoxic_T2_metaT_profile"))) %>%
+  ggplot(aes(x=Function, y=metatranscriptome, fill=Mean_ReadsMappedPerMillionReads)) +
+  geom_tile() +
+  scale_fill_gradientn(colors = c("#e1e8fa","#cc4e38","#3c211c"),
+                       breaks = c(1,10,20,30)) +
+  coord_flip() +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle=90, vjust=0.5, hjust=1)) +
+  geom_hline(yintercept = c(1.5, 3.5))
+```
+
+
+### metagenome reads mapped/million total reads (the first way of normalizing read counts in this notebook)
+```{r}
+head(gene.rel.abu.dat)
+# change colname to match with peat.sel.fun
+colnames(gene.rel.abu.dat)[1] = "gene_ids"
+
+# combine select functions with metaG TPMs
+peat.sel.fun.genes2 = peat.sel.fun %>% 
+  left_join(gene.rel.abu.dat, by = "gene_ids")
+
+peat.sel.fun.genes2 %>% head()
+
+# heatmap (tiles)
+peat.sel.fun.genes2 %>%
+  filter(!KO %in% c("K01190", "K12308")) %>%
+  pivot_longer(cols = -c(gene_ids, KO, Function), 
+               names_to = "metagenome", values_to = "TPM") %>%
+  group_by(KO, Function, metagenome) %>% 
+  summarise(avg=mean(TPM)) %>%
+  mutate(metagenome = factor(metagenome, levels = c("P_oxic_T0_profile", "P_oxic_T1_profile", "P_oxic_T2_profile", "P_oxic_T3_profile", "P_oxic_T4_profile", "P_anoxic_T1_profile", "P_anoxic_T2_profile", "P_anoxic_T3_profile", "P_anoxic_T4_profile"))) %>%
+  ggplot(aes(x=Function, y=metagenome, fill=avg)) +
+  geom_tile()  +
+  scale_fill_gradientn(colors = c("#e1e8fa","#cc4e38","#3c211c"),
+                       breaks = c(50,100,200,300))
+```
+
+
+
+
+
+
+
+
+
+
+
+# save image
+
+```{r}
+save.image(paste0(data.path, "/peat_gene-tr-AbuCalc.RData"))
+```
+

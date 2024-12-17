@@ -1,0 +1,489 @@
+---
+title: "wetland_methane_MAGs"
+author: "Linta Reji"
+date: "2024-06-02"
+output: html_document
+---
+
+# Summarizing wetland peat and saltmarsh MAGs
+
+Load libraries:
+```{r, echo=FALSE, message=FALSE}
+library(tidyverse)
+library(ggplot2)
+library(randomcoloR)
+library(DESeq2)
+```
+
+Read in data:
+```{r, echo=FALSE}
+data.path = dirname(getwd())
+dat.init = read.table(paste0(data.path, "/data/wetland_MAGs_summary.txt"), header=TRUE, sep="\t", check.names = FALSE)
+head(dat.init)
+```
+
+## Filter MAGs by quality and summarize
+
+```{r}
+# filter to keep medium- to high-quality MAGs
+dat = dat.init %>%
+  filter(Completeness >= 70 & Contamination < 10) %>%
+  mutate(mimag_quality_prelim = ifelse(Completeness > 89.5 & Contamination <= 5, "High", "Medium"))
+
+# plot the number of MAGs vs quality scores for each wetland
+dat %>%
+  select(wetland, mimag_quality_prelim) %>%
+  ggplot(aes(x=wetland)) + geom_bar(aes(fill=mimag_quality_prelim)) +
+  scale_fill_viridis_d()
+
+# MAG phylum-level diversity by wetland type
+dat %>%
+  ggplot(aes(x=phylum)) +
+  geom_bar(aes(fill=wetland)) +
+  theme(axis.text.x = element_text(angle=90, hjust=1, vjust=0.5 ))
+```
+
+## RPKM comparisons
+
+### Peat MAGs
+1. peat MAGs metagenomes rpkm
+```{r}
+# subset Peat MAGs
+dat.peat = dat %>% 
+  filter(wetland == "Peat") %>% select(-wetland)
+
+# plot relative abundance rpkm across timepoints in the metaGenomes
+dat.peat.metag.long <- dat.peat %>%
+  select(-starts_with("metaT")) %>%
+  pivot_longer(cols = starts_with("metaG"), names_to = "Timepoint", values_to = "RPKM")
+
+dat.peat.metag.long$Timepoint <- factor(dat.peat.metag.long$Timepoint, levels = c("metaG_T0_rpkm", "metaG_anoxicT1_rpkm", "metaG_anoxicT2_rpkm", "metaG_anoxicT3_rpkm", "metaG_anoxicT4_rpkm", "metaG_oxicT1_rpkm", "metaG_oxicT2_rpkm", "metaG_oxicT3_rpkm", "metaG_oxicT4_rpkm"))
+
+# distribution of peat metaG rpkm values:
+dat.peat.metag.long %>% 
+  ggplot(aes(x=RPKM)) +
+  geom_histogram()
+
+# filter out MAGs if any rpkm values have changed over time (compared to T0); and if the summed rpkm value >= 0.5
+peat_major_metag_bins = dat.peat.metag.long %>%
+  group_by(bins) %>% 
+  mutate(tmp = round(RPKM[Timepoint == "metaG_T0_rpkm"], 2)) %>%
+  mutate(changed = ifelse(abs(round(RPKM, 2) - tmp) >= 0.5, "yes", "no")) %>%
+  filter(any(changed == "yes")) %>%
+  # ummarise(rpkm_sum = sum(RPKM)) %>%
+  # filter(rpkm_sum >= 2) %>% 
+  select(bins)
+
+# to plot by genus, create a new var to uniquely identify novel genera
+dat.peat.metag.long = dat.peat.metag.long %>%
+  group_by(phylum) %>%
+  mutate(genus_ed = ifelse(genus == "g__", paste0("g__", phylum), genus))
+
+# custom x axis labels
+peat.metag.xlabs = c("T0", "T1 anoxic", "T2 anoxic", "T3 anoxic", "T4 anoxic", "T1 O2-shifted", "T2 O2-shifted", "T3 O2-shifted", "T4 O2-shifted" )
+
+# plot major bins
+dat.peat.metag.long %>%
+  filter(bins %in% peat_major_metag_bins$bins) %>%
+  arrange(phylum) %>%
+  ggplot(aes(x=Timepoint, y=fct_reorder(bins, phylum, .desc = TRUE), size=RPKM, color=phylum)) +
+  geom_point() +
+  scale_size(range = c(3,9))  +
+  scale_color_manual(values = distinctColorPalette(k = 10)) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90)) +
+  guides(color = guide_legend(override.aes = list(size = 2.5))) +
+  geom_text(aes(x=-2, y=bins, label = genus_ed), hjust=0, size=3,color = "black") +
+  ylab("") +
+  xlab("peat metaG rpkm") +
+  scale_x_discrete(labels = peat.metag.xlabs) +
+  geom_vline(xintercept = c(1.5, 5.5)) +
+  theme_minimal() +
+  theme(axis.text = element_text(color = "black", size = 11),
+        axis.text.x = element_text(face = "bold", color = "black", size = 12, angle = 90,
+                                   vjust=0.5, hjust=1))
+```
+
+2. peat MAGs metatranscriptomes rpkm
+```{r}
+# plot relative abundance rpkm across timepoints in the metatranscriptomes
+dat.peat.metat.long = dat.peat %>%
+  select(-starts_with("metaG")) %>%
+  pivot_longer(cols = contains("rpkm"), names_to = "Timepoint", values_to = "RPKM")
+
+dat.peat.metat.long$Timepoint <- factor(dat.peat.metat.long$Timepoint, levels = c("metaT_T0_RPKM", "metaT_anoxicT1_rpkm", "metaT_anoxicT2_rpkm", "metaT_oxicT1_rpkm", "metaT_oxicT2_rpkm"))
+
+# distribution of peat metaT rpkm values:
+dat.peat.metat.long %>% 
+  ggplot(aes(x=RPKM)) +
+  geom_histogram()
+
+# filter out MAGs if any rpkm values have changed over time (compared to T0)
+peat_major_metat_bins = dat.peat.metat.long %>%
+  group_by(bins) %>% 
+  mutate(tmp = round(RPKM[Timepoint == "metaT_T0_RPKM"], 3)) %>%
+  mutate(changed = ifelse(abs(round(RPKM, 3) - tmp) >= 0.005, "yes", "no")) %>%
+  filter(any(changed == "yes")) %>% 
+  select(bins)
+peat_major_metat_bins
+
+peat_select_bins = peat_major_metat_bins %>%
+  filter(bins %in% c("bin_81", "bin_64", "bin_113", "bin_108", "bin_101", "bin_96", "bin_5","bin_18", "bin_75", "bin_99", "bin_31", "bin_23", "bin_10"))
+
+# to plot by genus, create a new var to uniquely identify novel genera
+dat.peat.metat.long = dat.peat.metat.long %>%
+  group_by(phylum) %>%
+  mutate(genus_ed = ifelse(genus == "g__", paste0("g__", phylum), genus))
+
+# custom x axis labels
+peat.metat.xlabs = c("T0", "T1 anoxic", "T2 anoxic", "T1 O2-shifted", "T2 O2-shifted")
+
+# plot major bins
+dat.peat.metat.long %>%
+  filter(bins %in% peat_select_bins$bins) %>%
+  arrange(phylum) %>%
+  ggplot(aes(x=Timepoint, y=fct_reorder(bins, phylum, .desc = TRUE), size=RPKM, color=phylum)) +
+  geom_point() +
+  scale_size(range = c(2,8))  +
+  scale_color_manual(values = distinctColorPalette(k = 13)) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90)) +
+  guides(color = guide_legend(override.aes = list(size = 2.5))) +
+  geom_text(aes(x=-2, y=bins, label = genus_ed), hjust=0, size=3,color = "black") +
+  ylab("") +
+  xlab("peat MAGs metaT rpkm") +
+  scale_x_discrete(labels = peat.metat.xlabs) +
+  geom_vline(xintercept = c(1.5, 3.5)) +
+  theme_minimal() +
+  theme(axis.text = element_text(color = "black", size = 11),
+        axis.text.x = element_text(face = "bold", color = "black", size = 12, angle = 90, vjust=0.5, hjust=1))
+
+dat.peat.metat.long %>%
+  select(phylum, genus) %>%
+  group_by(phylum) %>%
+  summarise(genus = unique(genus))
+  
+```
+
+### saltmarsh MAGs
+1. saltmarsh MAGs metagenomes rpkm
+```{r}
+# subset saltmarsh MAGs
+dat.sm = dat %>% 
+  filter(wetland == "Saltmarsh") %>% select(-wetland) %>%
+  select(where(function(x) !all(is.na(x))))
+
+# plot relative abundance rpkm across timepoints in the metaGenomes
+# convert to long form
+dat.sm.metag.long <- dat.sm %>%
+  select(-starts_with("metaT")) %>%
+  pivot_longer(cols = starts_with("metaG"), names_to = "Timepoint", values_to = "RPKM")
+
+dat.sm.metag.long$Timepoint <- factor(dat.sm.metag.long$Timepoint, levels = c("metaG_T0_rpkm", "metaG_anoxicT1_rpkm", "metaG_anoxicT3_rpkm", "metaG_oxicT1_rpkm", "metaG_oxicT2_rpkm"))
+
+# distribution of saltmarsh metaG rpkm values:
+dat.sm.metag.long %>% 
+  ggplot(aes(x=RPKM)) +
+  geom_histogram()
+
+# filter out MAGs if any rpkm values have changed over time (compared to T0), and if the summed rpkm value >= 0.5
+sm_major_metag_bins = dat.sm.metag.long %>%
+  group_by(bins) %>% 
+  mutate(tmp = round(RPKM[Timepoint == "metaG_T0_rpkm"], 2)) %>%
+  mutate(changed = ifelse(abs(round(RPKM, 2) - tmp) >= 0.5, "yes", "no")) %>%
+  filter(any(changed == "yes")) %>% 
+  summarise(rpkm_sum = sum(RPKM)) %>%
+  filter(rpkm_sum >= 0.5) %>% select(bins)
+
+# to plot by genus, create a new var to uniquely identify novel genera
+dat.sm.metag.long = dat.sm.metag.long %>%
+  group_by(phylum) %>%
+  mutate(genus_ed = ifelse(genus == "g__", paste0("g__", phylum), genus))
+
+# custom x axis labels
+sm.metag.xlabs = c("T0", "T1 anoxic", "T3 anoxic", "T1 O2-shifted", "T2 O2-shifted")
+
+# plot major bins
+dat.sm.metag.long %>%
+  filter(bins %in% sm_major_metag_bins$bins) %>%
+  arrange(phylum) %>%
+  ggplot(aes(x=Timepoint, y=fct_reorder(bins, phylum, .desc = TRUE), size=RPKM, color=phylum)) +
+  geom_point() +
+  scale_size(range = c(3,9))  +
+  scale_color_manual(values = distinctColorPalette(k = 9)) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90)) +
+  guides(color = guide_legend(override.aes = list(size = 2.5))) +
+  geom_text(aes(x=-2, y=bins, label = genus_ed), hjust=0, size=3,color = "black") +
+  ylab("") +
+  xlab("sm metaG rpkm") +
+  scale_x_discrete(labels = sm.metag.xlabs) +
+  geom_vline(xintercept = c(1.5, 3.5)) +
+  theme_minimal() +
+  theme(axis.text = element_text(color = "black", size = 11),
+        axis.text.x = element_text(face = "bold", color = "black", size = 12, angle = 90,
+                                   vjust=0.5, hjust=1))
+```
+
+2. saltmarsh MAGs metatranscriptomes rpkm
+```{r message=FALSE}
+# plot relative abundance rpkm across timepoints in the metatranscriptomes
+dat.sm.metat.long = dat.sm %>%
+  select(-starts_with("metaG")) %>%
+  pivot_longer(cols = starts_with("metaT"), names_to = "Timepoint", values_to = "RPKM")
+
+# adjust factor levels
+dat.sm.metat.long$Timepoint <- factor(dat.sm.metat.long$Timepoint, levels = c("metaT_T0_RPKM", "metaT_anoxicT1_rpkm", "metaT_oxicT1_rpkm", "metaT_oxicT2_rpkm"))
+
+# distribution of saltmarsh metaT rpkm values:
+dat.sm.metat.long %>% 
+  ggplot(aes(x=RPKM)) +
+  geom_histogram()
+
+# filter out MAGs if the summed RPKM is <0.2
+sm_major_metat_bins = dat.sm.metat.long %>%
+  group_by(bins) %>% 
+  mutate(tmp = round(RPKM[Timepoint == "metaT_T0_RPKM"], 3)) %>%
+  mutate(changed = ifelse(abs(round(RPKM, 3) - tmp) >= 0.05, "yes", "no")) %>%
+  filter(any(changed == "yes")) %>%
+  select(bins)
+dim(sm_major_metat_bins)
+  
+# to plot by genus, create a new var to uniquely identify novel genera
+dat.sm.metat.long = dat.sm.metat.long %>%
+  group_by(phylum) %>%
+  mutate(genus_ed = ifelse(genus == "g__", paste0("g__", phylum), genus))
+
+# custom x axis labels
+sm.metat.xlabs = c("T0", "T1 anoxic", "T1 O2-shifted", "T2 O2-shifted")
+
+# plot major bins
+# for some reason, the saltmarsh metaT data needed to be sorted after reverting back to wider format:
+dat.sm.metat.long %>%
+  filter(bins %in% sm_major_metat_bins$bins) %>%
+  pivot_wider(names_from = Timepoint, values_from = RPKM) %>%
+  arrange(phylum) %>%
+  mutate(bins=factor(bins, levels=bins)) %>%
+  pivot_longer(cols = starts_with("metaT"), names_to = "Timepoint", values_to = "RPKM") %>%
+  ggplot(aes(x=Timepoint, y=bins, size=RPKM, color=phylum)) +
+  geom_point() +
+  scale_size(range = c(2,8))  +
+  scale_color_manual(values = distinctColorPalette(k = 31)) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90)) +
+  guides(color = guide_legend(override.aes = list(size = 2.5))) +
+  geom_text(aes(x=-2, y=bins, label = genus_ed), hjust=0, size=3,color = "black") +
+  ylab("") +
+  xlab("saltmarsh MAGs metaT rpkm") +
+  scale_x_discrete(labels = sm.metat.xlabs) +
+  geom_vline(xintercept = c(1.5, 2.5)) +
+  theme_minimal() +
+  theme(axis.text = element_text(color = "black", size = 11),
+        axis.text.x = element_text(face = "bold", color = "black", size = 12, angle = 90,
+                                   vjust=0.5, hjust=1))
+
+```
+
+
+## DESeq2 analysis on MAG relative abundances
+
+Read in and prep the data for DEseq2 analysis
+```{r}
+# read in the raw mapped read counts
+dat.deseq = read.table(paste0(data.path, "/data/wetland_MAGs_counts_deseq2.txt"), header=TRUE, sep="\t", check.names = FALSE)
+# read in the metadata file
+meta.deseq = read.table(paste0(data.path, "/data/wetland_MAGs_metadata_deseq2.txt"), header=TRUE, sep="\t", check.names = FALSE)
+# filter out the initial timpoint
+meta.deseq = meta.deseq %>% filter(timepoint != "T0")
+
+## split into metaG and metaT count/metadata tables.
+dat.deseq.mg = dat.deseq %>% select(wetland, bins, contains("metaG"))
+dat.deseq.mt = dat.deseq %>% select(wetland, bins, contains("metaT"))
+meta.deseq.mg = meta.deseq %>% filter(genome == "metaG")
+meta.deseq.mt = meta.deseq %>% filter(genome == "metaT")
+```
+
+## Peat
+Peat differentially abundant MAGs
+```{r}
+# get peat metagenome data
+peat.mg.deseq = dat.deseq.mg %>% filter(wetland == "peat") %>% select(-wetland, -contains("T0")) %>% select(contains("_T")) %>% mutate_at(1:8, as.integer)
+
+# add bin IDs as rownames
+row.names(peat.mg.deseq) = dat.deseq.mg %>% filter(wetland == "peat") %>% select(bins) %>% unlist()
+
+# DESeq analysis
+peat.mg.dds = DESeqDataSetFromMatrix(peat.mg.deseq, colData=meta.deseq.mg, design=~treatment)
+peat.mg.dds.calc = DESeq(peat.mg.dds)
+peat.mg.res = results(peat.mg.dds.calc)
+summary(peat.mg.res)
+
+# filtering based on adjusted p-value < 0.05 and absolute log2 fold change >= 1.5
+peat.mg.resSig = subset(peat.mg.res, padj < 0.05 & abs(log2FoldChange) >= 1.5)
+rownames(peat.mg.resSig)
+
+# plot significantly differentially abundant peat MAGs
+dat.peat.metag.long %>%
+  filter(bins %in% rownames(peat.mg.resSig)) %>%
+  pivot_wider(names_from = Timepoint, values_from = RPKM) %>%
+  arrange(phylum) %>%
+  mutate(bins=factor(bins, levels=bins)) %>%
+  pivot_longer(cols = starts_with("metaG"), names_to = "Timepoint", values_to = "RPKM") %>%
+  ggplot(aes(x=Timepoint, y=bins, size=RPKM, color=phylum)) +
+  geom_point() +
+  scale_size(range = c(2,8))  +
+  scale_color_manual(values = distinctColorPalette(k = 3)) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90)) +
+  guides(color = guide_legend(override.aes = list(size = 2.5))) +
+  geom_text(aes(x=-2, y=bins, label = genus_ed), hjust=0, size=3,color = "black") +
+  ylab("") +
+  xlab("Peat MAGs metaG rpkm") +
+  scale_x_discrete(labels = peat.metag.xlabs) +
+  geom_vline(xintercept = c(1.5, 5.5)) +
+  theme_minimal() +
+  theme(axis.text = element_text(color = "black"),
+        axis.text.x = element_text(face = "bold", color = "black", size = 12, angle = 90, vjust=0.5, hjust=1))
+
+```
+
+Peat differentially active MAGs
+```{r}
+# get peat metatranscriptome data
+peat.mt.deseq = dat.deseq.mt %>% filter(wetland == "peat") %>% select(-wetland, -contains("T0")) %>%
+  select(contains("_T")) %>% mutate_at(1:4, as.integer)
+
+# add bin IDs as rownames
+row.names(peat.mt.deseq) = dat.deseq.mt %>% filter(wetland == "peat") %>% select(bins) %>% unlist()
+
+# DESeq analysis
+peat.mt.dds = DESeqDataSetFromMatrix(peat.mt.deseq, colData=meta.deseq.mt, design=~treatment)
+peat.mt.dds.calc = DESeq(peat.mt.dds)
+peat.mt.res = results(peat.mt.dds.calc)
+summary(peat.mt.res)
+plotMA(peat.mt.res)
+
+# filtering based on adjusted p-value < 0.05 and absolute log2 fold change > 1
+peat.mt.resSig = subset(peat.mt.res, padj < 0.05 & abs(log2FoldChange) >= 1)
+rownames(peat.mt.resSig)
+
+# plot significantly differentially active peat MAGs
+dat.peat.metat.long %>%
+  filter(bins %in% rownames(peat.mt.resSig)) %>%
+  pivot_wider(names_from = Timepoint, values_from = RPKM) %>%
+  arrange(phylum) %>%
+  mutate(bins=factor(bins, levels=bins)) %>%
+  pivot_longer(cols = starts_with("metaT"), names_to = "Timepoint", values_to = "RPKM") %>%
+  ggplot(aes(x=Timepoint, y=bins, size=RPKM, color=phylum)) +
+  geom_point() +
+  scale_size(range = c(2,8))  +
+  scale_color_manual(values = distinctColorPalette(k = 7)) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90)) +
+  guides(color = guide_legend(override.aes = list(size = 2.5))) +
+  geom_text(aes(x=-2, y=bins, label = genus_ed), hjust=0, size=3,color = "black") +
+  ylab("") +
+  xlab("Peat MAGs metaT rpkm") +
+  scale_x_discrete(labels = peat.metat.xlabs) +
+  geom_vline(xintercept = c(1.5, 3.5)) +
+  theme_minimal() +
+  theme(axis.text = element_text(color = "black"),
+        axis.text.x = element_text(face = "bold", color = "black", angle = 90, vjust=0.5, hjust=1))
+
+```
+
+
+## Saltmarsh
+Saltmrash differentially abundant MAGs
+```{r}
+# get saltmarsh metagenome data
+sm.mg.deseq = dat.deseq.mg %>% filter(wetland == "saltmarsh") %>% select(-wetland, -contains("T0")) %>%
+  select(contains("_T")) %>% select(where(~!all(is.na(.)))) %>% mutate_at(1:4, as.integer)
+
+# add bin IDs as rownames
+row.names(sm.mg.deseq) = dat.deseq.mg %>% filter(wetland == "saltmarsh") %>% select(bins) %>% unlist()
+
+# DESeq analysis
+sm.mg.dds <- DESeqDataSetFromMatrix(sm.mg.deseq, colData= (meta.deseq.mg %>% filter(sample %in% colnames(sm.mg.deseq))), design=~treatment)
+sm.mg.dds.calc = DESeq(sm.mg.dds)
+sm.mg.res = results(sm.mg.dds.calc)
+plotMA(sm.mg.res)
+
+# filtering based on adjusted p-value < 0.01 and absolute log2 fold change >= 2
+sm.mg.resSig = subset(sm.mg.res, padj < 0.01 & abs(log2FoldChange) >= 2)
+# p-value < 0.01 and log2 FC > 4
+sm.mg.resSig01 = subset(sm.mg.res, padj < 0.01 & abs(log2FoldChange) > 5)
+
+# plot significantly differentially abundant saltmarsh MAGs
+dat.sm.metag.long %>%
+  filter(bins %in% rownames(sm.mg.resSig01)) %>%
+  pivot_wider(names_from = Timepoint, values_from = RPKM) %>%
+  arrange(phylum) %>%
+  mutate(bins=factor(bins, levels=bins)) %>%
+  pivot_longer(cols = starts_with("metaG"), names_to = "Timepoint", values_to = "RPKM") %>%
+  ggplot(aes(x=Timepoint, y=bins, size=RPKM, color=phylum)) +
+  geom_point() +
+  scale_size(range = c(2,8))  +
+  scale_color_manual(values = distinctColorPalette(k = 11)) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90)) +
+  guides(color = guide_legend(override.aes = list(size = 2.5))) +
+  geom_text(aes(x=-2, y=bins, label = genus_ed), hjust=0, size=3,color = "black") +
+  ylab("") +
+  xlab("Saltmarsh MAGs metaG rpkm") +
+  scale_x_discrete(labels = sm.metag.xlabs) +
+  geom_vline(xintercept = c(1.5, 3.5)) +
+  theme_minimal() +
+  theme(axis.text = element_text(color = "black", size = 11),
+        axis.text.x = element_text(face = "bold", color = "black", angle = 90, vjust=0.5, hjust=1))
+```
+
+Saltmarsh differentially active MAGs
+```{r}
+## get saltmarsh metatranscriptome data
+sm.mt.deseq = dat.deseq.mt %>% filter(wetland == "saltmarsh") %>% select(-wetland, -contains("T0")) %>%
+  select(contains("_T")) %>% select(where(~!all(is.na(.)))) %>% mutate_at(1:3, as.integer)
+# set bin IDs as rownames
+row.names(sm.mt.deseq) = dat.deseq.mt %>% filter(wetland == "saltmarsh") %>% select(bins) %>% unlist()
+# DESEQ analysis
+sm.mt.dds <- DESeqDataSetFromMatrix(sm.mt.deseq, colData=(meta.deseq.mt %>% filter(sample %in% colnames(sm.mt.deseq))), design=~treatment)
+sm.mt.dds.calc = DESeq(sm.mt.dds)
+sm.mt.res = results(sm.mt.dds.calc)
+plotMA(sm.mt.res)
+
+# filtering based on adjusted p-value < 0.05 and absolute log2 fold change >= 2
+sm.mt.resSig <- subset(sm.mt.res, padj < 0.05 & abs(log2FoldChange) >= 2)
+rownames(sm.mt.resSig)
+
+# p-value < 0.01 and log2 FC > 4
+sm.mt.resSig01 = subset(sm.mt.res, padj < 0.01 & abs(log2FoldChange) > 4)
+
+# plot significantly differentially active saltmarsh MAGs
+dat.sm.metat.long %>%
+  filter(bins %in% rownames(sm.mt.resSig01)) %>%
+  pivot_wider(names_from = Timepoint, values_from = RPKM) %>%
+  arrange(phylum) %>%
+  mutate(bins=factor(bins, levels=bins)) %>%
+  pivot_longer(cols = starts_with("metaT"), names_to = "Timepoint", values_to = "RPKM") %>%
+  ggplot(aes(x=Timepoint, y=bins, size=RPKM, color=phylum)) +
+  geom_point() +
+  scale_size(range = c(2,8))  +
+  scale_color_manual(values = distinctColorPalette(k = 10)) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90)) +
+  guides(color = guide_legend(override.aes = list(size = 2.5))) +
+  geom_text(aes(x=-2, y=bins, label = genus_ed), hjust=0, size=3,color = "black") +
+  ylab("") +
+  xlab("Saltmarsh MAGs metaT rpkm") +
+  scale_x_discrete(labels = sm.metat.xlabs) +
+  geom_vline(xintercept = c(1.5, 2.5)) +
+  theme_minimal() +
+  theme(axis.text = element_text(color = "black", size = 11),
+        axis.text.x = element_text(face = "bold", color = "black", angle = 90, vjust=0.5, hjust=1))
+```
+
+
+
+
+
+

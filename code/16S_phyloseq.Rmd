@@ -1,0 +1,838 @@
+---
+title: "Wetland 16S rRNA V4 analysis"
+author: "Linta Reji"
+date: "2024-04-04"
+output: html_document
+---
+
+# Analyzing 16S rRNA V4 amplicon data
+
+Load libraries:
+```{r message=FALSE}
+library(phyloseq)
+library(tidyverse)
+library(microViz)
+library(ggthemes)
+library(colorspace)
+library(metagMisc)
+library(ggpubr)
+library(vegan)
+library(microshades)
+library(randomcoloR)
+library(speedyseq)
+library(ANCOMBC)
+```
+
+Read in DADA2 outputs (seqtab and taxaF objects)
+
+```{r}
+# data path variable
+data.path = dirname(getwd())
+# read in ASV count file
+seqtab = readRDS(paste0(data.path, "/data/seqtab.nochim.RDS"))
+# read in taxonomy file
+taxtab = readRDS(paste0(data.path, "/data/tax.RDS"))
+# read in sample metadata file
+sample.data = readRDS(paste0(data.path, "/data/sample_data.RDS"))
+```
+
+Create a phyloseq object, combining seqtab, taxtab, and sample metadata.
+```{r}
+# extract sample names
+samples = sapply(strsplit(rownames(seqtab), "_"), `[`, 1)
+# replace rownames of seq table
+rownames(seqtab) = samples
+# check to make sure rownames of sample metadata file are the same as those of the seq table
+rownames(sample.data) == samples
+
+# create a phyloseq object
+ps.wetland = phyloseq(otu_table(seqtab, taxa_are_rows=FALSE), tax_table(taxtab), sample_data(sample.data))
+ps.wetland # 25496 taxa and 80 samples
+
+## Simply taxa names (currently taxa_names are ASV sequences)
+# save original taxa names to a new variable
+orig_taxa_names = taxa_names(ps.wetland)
+
+# change taxa names in the phyloseq object
+taxa_names(ps.wetland) <- paste0("ASV_", seq(ntaxa(ps.wetland)))
+head(taxa_names(ps.wetland))
+```
+
+## Remove eukaryotic reads 
+Chloroplasts and mitochondria are often picked up by 16S primers. In Silva-based taxonomy assignments, mitochondria are annotated as Family of the Order Rickettsiales and Chloroplasts are annotated at the Order level within Cyanobacteria.
+```{r}
+ps.wetland = ps.wetland %>%
+  subset_taxa( Kingdom %in% c("Bacteria", "Archaea")) %>%
+  subset_taxa(Order != "Chloroplast") %>%
+  subset_taxa(Family != "Mitochondria")
+
+ps.wetland # 12050 taxa and 80 samples
+```
+
+## Fix taxonomy table
+```{r}
+ps.wetland.fix = tax_fix(ps.wetland, unknowns = c("Incertae Sedis"))
+ps.wetland.fix = phyloseq_validate(ps.wetland.fix, remove_undetected = TRUE)
+
+```
+
+## Ordination plot, all three wetland types together
+```{r}
+# Aitchison PCoA at the Genus level
+ps.wetland.fix %>% 
+  tax_transform("identity", rank = "Genus", zero_replace = 1) %>% 
+  dist_calc("aitchison") %>% 
+  ord_calc("PCoA") %>% 
+  ord_plot(color = "Timepoint", shape = "Treatment", size = 3) +
+  stat_ellipse(aes(linetype = Group)) +
+  theme_few() +
+  scale_color_discrete_sequential(palette = "Red")
+
+# alternatively, PCA on clr-transformed data
+ps.wetland.fix %>% tax_transform("clr", rank = "Genus") %>%
+  ord_calc(method = "PCA") %>% 
+  ord_plot(color = "Timepoint", shape = "Treatment", size = 4) +
+  scale_color_discrete_diverging(palette = "Blue-Red") +
+  stat_ellipse(aes(linetype = Group), level = 0.99) +
+  theme_few() +
+  coord_fixed(ratio = 0.5)
+```
+
+
+## Phyloseq object preprocessing
+
+### Split ps by wetland type:
+```{r}
+# phyloseq_sep_variable from metagMisc package
+ps.wetland.split = phyloseq_sep_variable(ps.wetland, variable="Group", drop_zeroes = T)
+ps.peat = ps.wetland.split$Peat #3375 taxa and 29 samples
+ps.marsh = ps.wetland.split$Marsh #6535 taxa and 28 samples
+ps.saltmarsh = ps.wetland.split$Saltmarsh #3932 taxa and 23 samples
+
+# combine all three into a list
+ps.list = list("peat"=ps.peat, "marsh"=ps.marsh, "saltmarsh"=ps.saltmarsh)
+ps.list
+```
+
+
+### Data exploration and sanity checks:
+
+Plot histogram of read counts by wetland type:
+```{r}
+# for each object, create a dataframe with ASVs and reads
+df.list = lapply(ps.list, function(x){
+    data.frame(ASVs=rowSums(otu_table(x)>0), reads=sample_sums(x), sample_data(x))
+  })
+df.list
+
+# multi-panel figure with read count histogram
+# ggarrange from library(ggpubr)
+ggarrange(plotlist = (lapply(df.list, function(ps) {
+  ggplot(ps, aes(x=reads)) +
+  geom_histogram(bins=50, aes(color=Timepoint, fill=Timepoint)) + 
+  scale_color_brewer(palette="Spectral") +
+  theme_bw() +  
+  geom_vline(xintercept=2000, color= "red", linetype='dashed') +
+  xlab("Read Count") + ylab("Sample Count")
+})),
+labels=c("Peat","Marsh","Saltmarsh"), label.x=0.2, label.y = 0.95,
+ncol=3)
+
+```
+
+Plot ASVs vs. Read counts
+```{r}
+df.list[[1]]$Treatment = factor(df.list[[1]]$Treatment, levels = c("Initial", "Anoxic", "Oxygen-shifted"))
+df.list[[2]]$Treatment = factor(df.list[[2]]$Treatment, levels = c("Initial", "Anoxic", "Oxygen-shifted"))
+df.list[[3]]$Treatment = factor(df.list[[3]]$Treatment, levels = c("Initial", "Anoxic", "Oxygen-shifted"))
+
+
+ggarrange(plotlist = (lapply(df.list, function(ps) {
+  ggplot(ps, aes(x = Treatment, y = reads, color = ASVs)) +
+  geom_boxplot(color="black") + theme_bw() +
+  geom_jitter(width=.2, height=0)  + 
+  #ylim(0,122000) +
+  theme(axis.text.x = element_text(angle = 90)) +
+  geom_hline(yintercept=25000, color= "purple", linetype='dashed') +
+  geom_hline(yintercept=1000, color= "red", linetype='dashed') +
+  scale_color_viridis_b()
+})),
+labels=c("Peat: ASVs vs. Reads","Marsh: ASVs vs. Reads","Saltmarsh: ASVs vs. Reads"),
+label.y=0.98, nrow=3)
+```
+
+Inspect the rarefaction curve to see which samples to discard
+
+1. peat
+```{r}
+asv.peat = as.data.frame(as.matrix(otu_table(ps.peat)))
+rarecurve(asv.peat, step=50)
+
+# to zoom in, select samples with <4000 reads
+asv.peat.low = asv.peat %>%
+    filter(rowSums(.) < 4000)
+rarecurve(asv.peat.low, step=50)
+
+# also check sample_sums
+sort(sample_sums(ps.peat))
+
+# we can get rid of AP10 since it's not sequenced well enough
+ps.peat = subset_samples(ps.peat, row.names(sample_data(ps.peat)) != "AP10" )
+ps.peat #3375 taxa and 28 samples
+```
+
+
+2. marsh:
+```{r}
+asv.marsh = as.data.frame(as.matrix(otu_table(ps.marsh)))
+rarecurve(asv.marsh, step=50)
+
+# rarecurve for low-readcount samples
+# select samples with <4000 reads
+asv.marsh.low = asv.marsh %>%
+    filter(rowSums(.) < 4000)
+rarecurve(asv.marsh.low, step=50)
+
+# looks like AM10, M12 are less well sequenced. M8 is plateauing, even though #reads <2000.
+# also check sample_sums
+sort(sample_sums(ps.marsh))
+marsh.1500 = names(which(sample_sums(ps.marsh) < 1500))
+
+# we can get rid of samples with <1500 reads 
+ps.marsh = subset_samples(ps.marsh, !row.names(sample_data(ps.marsh)) %in% marsh.1500 )
+ps.marsh #6535 taxa and 22 samples
+```
+
+
+3. saltmarsh
+```{r}
+asv.saltmarsh = as.data.frame(as.matrix(otu_table(ps.saltmarsh)))
+rarecurve(asv.saltmarsh, step=50)
+
+# rarecurve for low-readcount samples
+sort(rowSums(asv.saltmarsh))
+# select samples with <4000 reads
+asv.saltmarsh.low = asv.saltmarsh %>%
+    filter(rowSums(.) < 4000)
+rarecurve(asv.saltmarsh.low, step=50)
+
+# looks like S19, S20, and S14 are not good.
+sort(sample_sums(ps.saltmarsh))
+saltmarsh.2000 = names(which(sample_sums(ps.saltmarsh) < 2000))
+
+# we can get rid of samples with <2000 reads 
+ps.saltmarsh = subset_samples(ps.saltmarsh, !row.names(sample_data(ps.saltmarsh)) %in% saltmarsh.2000 )
+ps.saltmarsh # 3932 taxa and 20 samples
+```
+
+Combine the qc-filtered ps objects into a new list:
+```{r}
+ps.list = list("peat"=ps.peat, "marsh"=ps.marsh, "saltmarsh"=ps.saltmarsh)
+
+# for plotting, fix sample_data variables
+peat.samdata = sample_data(ps.list$peat)
+peat.samdata$Treatment = factor(peat.samdata$Treatment, levels=c("Initial", "Anoxic", "Oxygen-shifted"))
+peat.samdata$sample_id = factor(peat.samdata$sample_id, levels=c("P0", "AP0", "P22", "AP22", "P23", "P24", "P19", "P20", "P21", "P16", "P17", "P18", "P13", "P14", "P15", "P10", "P11", "P12", "P7", "P8", "AP8", "P9", "P4", "P5", "P6", "P1", "P2", "P3"))
+sample_data(ps.list$peat) = peat.samdata
+
+marsh.samdata = sample_data(ps.list$marsh)
+marsh.samdata$Treatment = factor(marsh.samdata$Treatment, levels=c("Initial", "Anoxic", "Oxygen-shifted"))
+marsh.samdata$sample_id = factor(marsh.samdata$sample_id, levels=c("M0", "AM0", "M22", "AM22", "M23", "M24", "M19", "M20", "M21", "M16", "M17", "M18", "M13", "M15", "M10", "M11", "M7", "M8", "AM8", "M9", "M4", "M5", "M6", "M1", "M2", "M3"))
+sample_data(ps.list$marsh) = marsh.samdata
+
+saltmarsh.samdata = sample_data(ps.list$saltmarsh)
+saltmarsh.samdata$Treatment = factor(saltmarsh.samdata$Treatment, levels=c("Initial", "Anoxic", "Oxygen-shifted"))
+saltmarsh.samdata$sample_id = factor(saltmarsh.samdata$sample_id, levels=c("S0", "AS0", "S22", "AS22", "S23", "S16", "S17", "S18", "S13", "S10", "AS10","S11", "S12", "S7", "S8", "AS8", "S9", "S5", "S6", "S2"))
+sample_data(ps.list$saltmarsh) = saltmarsh.samdata
+```
+
+
+## Alpha diversity calculations
+### FIGURE S3
+```{r}
+# rarefy before diversity estimation:
+ps.list.rare = lapply(ps.list, rarefy_even_depth, rngseed=1)
+ps.list.rare
+
+# plot alpha diversity indices
+ggarrange(plotlist = (lapply(ps.list.rare, function(ps) {
+  plot_richness(ps, color="Treatment", x="Timepoint", measures=c("Chao1", "InvSimpson")) +
+    geom_boxplot() +
+    geom_jitter(width=0.3) +
+    scale_color_manual(values = c("#abc989","#177e89","#db3a34")) +
+    theme_few()
+})),
+nrow=3)
+```
+
+Significance tests on PB peat alpha diversity measures:
+```{r}
+# add alpha div as a column to the sample_data object
+sample_data(ps.list.rare$peat)$richness = estimate_richness(ps.list.rare$peat, measures="Observed")$Observed
+sample_data(ps.list.rare$peat)$InvSimp = estimate_richness(ps.list.rare$peat, measures="InvSimpson")$InvSimpson
+sample_data(ps.list.rare$peat)$shannon = estimate_richness(ps.list.rare$peat, measures="Shannon")$Shannon
+
+# Shapiro-Wilk test of normality:
+sample_data(ps.list.rare$peat)$richness %>%
+  as.matrix() %>% shapiro.test() # W = 0.97002, p-value = 0.5812; close to normally distr.
+sample_data(ps.list.rare$peat)$InvSimp %>%
+  as.matrix() %>% shapiro.test() # W = 0.85202, p-value = 0.001027; not normally distr.
+
+# use non-paramteric tests
+peat_dat_forSigTest = ps.list.rare$peat %>% psmelt() %>% select ( Timepoint, Treatment, richness, InvSimp) %>% filter(Treatment != "Initial")
+
+# can rotate through each timepoint to see if the treatment alpha div's differe significantly at each timepoint. Example for T1:
+TP1 = peat_dat_forSigTest %>% filter(Timepoint == "T1")
+kruskal.test(TP1$richness ~ TP1$Treatment) # chi-squared = 1459.4, df = 1, p-value < 2.2e-16
+
+# create a new interacting variable tr-time
+peat_dat_forSigTest$Treatment_Timepoint = paste0(peat_dat_forSigTest$Treatment, "_", peat_dat_forSigTest$Timepoint)
+
+
+# pairwise wilcoxon rank test:
+pairwise.wilcox.test(peat_dat_forSigTest$richness, peat_dat_forSigTest$Treatment_Timepoint, p.adjust.method="fdr")
+pairwise.wilcox.test(peat_dat_forSigTest$InvSimp, peat_dat_forSigTest$Treatment_Timepoint, p.adjust.method="fdr")
+
+```
+
+
+
+Fix ps objects to make taxa uniquely identifiable for each wetland type. Some taxa are not present across all three. 
+```{r}
+# use tax_fix from the microViz package
+ps.list.fix = lapply(ps.list, tax_fix, unknowns = c("Incertae Sedis"))
+ps.list.fix = lapply(ps.list.fix, phyloseq_validate, remove_undetected = TRUE)
+```
+
+
+## Ordinations
+### clr transformations, PCoA, PCA
+```{r}
+# Aitchison PCoA
+ggarrange(plotlist = (lapply(ps.list.fix, function(ps) {
+  ps %>% 
+  # tax_transform("identity", rank = "Order", zero_replace = 1) %>% 
+  dist_calc("aitchison") %>% 
+  ord_calc("PCoA") %>% 
+  ord_plot(color = "Timepoint", shape = "Treatment", size = 3, auto_caption = NA) +
+  theme_few() +
+  scale_color_discrete_diverging(palette = "Tropic")
+}
+)), nrow=3, common.legend = TRUE, legend="right", labels = c("Peat", "Marsh", "Saltmarsh"), label.x = 0.1, align="hv", vjust=0.2)
+
+# rarefy and pcoA
+ggarrange(plotlist = (lapply(ps.list.fix, function(ps) {
+  ps %>% 
+  rarefy_even_depth(.) %>%
+  #tax_transform("identity", rank = "Genus") %>%
+  dist_calc("bray") %>%
+  ord_calc(method = "PCoA") %>% 
+  ord_plot(color = "Timepoint", shape = "Treatment", size = 3, auto_caption = NA) +
+  theme_few() +
+  scale_color_discrete_diverging(palette = "Blue-Red")
+}
+)), nrow=3, common.legend = TRUE, legend="right", labels = c("Peat", "Marsh", "Saltmarsh"), label.x = 0.1, align="hv", vjust=0.2)
+
+# PCA with key taxa vectors
+ps.list.fix$peat %>% tax_transform("clr", rank = "Genus") %>%
+  ord_calc(method = "PCA") %>% 
+  ord_plot(color = "Timepoint", shape = "Treatment", size = 4, plot_taxa=1:5, tax_lab_style = c(size=2.5, perpendicular=TRUE, position=position_jitter(width=0.1, height=0.1))) +
+  scale_color_discrete_diverging(palette = "Blue-Red") +
+  coord_fixed(ratio = 0.56)
+
+```
+
+## Ordinations separately
+```{r}
+# Aitchison PCoA
+ps.list.fix$peat %>%
+  dist_calc("aitchison") %>% 
+  ord_calc("PCoA") %>% 
+  ord_plot(color = "Timepoint", shape = "Treatment", size = 3, auto_caption = NA) +
+  theme_few() +
+  scale_color_viridis_d()
+  scale_color_discrete_diverging(palette = "Blue-Red")
+```
+
+
+## Abundance heat maps
+```{r}
+ps.list.fix$peat %>%
+  tax_transform("clr", rank = "Class") %>%
+  comp_heatmap(colors = heat_palette(sym = TRUE),
+               sample_anno = sampleAnnotation(
+                 Treatment = anno_sample_cat(var = "Treatment"),
+                 Timepoint = anno_sample_cat(var = "Timepoint")
+    ))
+```
+
+
+## Relative abundance bar plots
+### Bar plots using microshades packages
+### Figure 3
+First, prep the ps list for plotting:
+```{r}
+# prep_mdf from microshades agglomerates a phyloseq object at a specified level and transforms counts to relative abundance. Also it melts the ps object into a df.
+ps.list.fix.gen = lapply(ps.list.fix, prep_mdf, subgroup_level = "Genus")
+```
+
+2. peat
+```{r}
+# extract peat ps 
+# remove technical duplicates to reduce plot complexity
+ps.peat.fix.gen = ps.list.fix.gen$peat %>% 
+  filter(!Sample %in% c("AP22", "AP8")) %>%
+  filter(Abundance > 0.01)
+
+# create color object for selected taxa
+color_obj_peat = create_color_dfs(ps.peat.fix.gen, selected_groups = c("Acidobacteriota", "Bacteroidota", "Proteobacteria", "Verrucomicrobiota", "Euryarchaeota"), cvd = TRUE)
+
+# extract plot objects
+mdf_peat = color_obj_peat$mdf
+cdf_peat = color_obj_peat$cdf
+
+# fix variable levels before plotting
+mdf_peat$Treatment = factor(mdf_peat$Treatment, aes("Initial", "Oxygen-shifted", "Anoxic"))
+
+mdf_peat$Sample = factor(mdf_peat$Sample, levels=c("P0", "AP0", "P22", "P23", "P24", "P19", "P20", "P21", "P16", "P17", "P18", "P13", "P14", "P15", "P10", "P11", "P12", "P7", "P8", "P9", "P4", "P5", "P6", "P1", "P2", "P3"))
+
+# bar plot using microshades
+plot_microshades(mdf_peat, cdf_peat) +
+  facet_grid(~Treatment, scales = "free", space = "free") +
+  theme_few() +
+  theme(axis.text = element_text(color = "black", size = 11),
+        axis.text.x = element_text(angle = 90))
+
+# bar plot using ggplot2
+ps.list.fix.gen$peat %>% filter(Abundance > 0.01) %>%
+  ggplot(aes(x = sample_id, y = Abundance, fill = Class)) + 
+  facet_grid(~Treatment, scales="free", space="free") +
+  geom_bar(stat = "identity") +
+  scale_fill_manual(values = distinctColorPalette(16)) +
+  theme_few() +
+  theme(legend.position="bottom") +
+  ggtitle("Peat: ASVs >1%")
+
+```
+
+2. marsh
+```{r}
+# extract marsh ps 
+# remove technical duplicates to reduce plot complexity
+ps.marsh.fix.gen = ps.list.fix.gen$marsh %>% 
+  filter(!Sample %in% c("AM22", "AM8"))
+
+# create color object for selected taxa
+color_obj_marsh = create_color_dfs(ps.marsh.fix.gen, selected_groups = c("Acidobacteriota", "Bacteroidota", "Proteobacteria", "Verrucomicrobiota", "Euryarchaeota"), cvd = TRUE)
+
+# extract plot objects
+mdf_marsh = color_obj_marsh$mdf
+cdf_marsh = color_obj_marsh$cdf
+
+# fix variable levels before plotting
+mdf_marsh$Treatment = factor(mdf_marsh$Treatment, aes("Initial", "Oxygen-shifted", "Anoxic"))
+
+mdf_marsh$Sample = factor(mdf_marsh$Sample, levels=c("M0", "AM0", "M22", "M23", "M24", "M19", "M20", "M21", "M16", "M17", "M18", "M13", "M15", "M10", "M11", "M12", "M7", "M8", "M9", "M4", "M5", "M6", "M1", "M2", "M3"))
+
+# bar plot using microshades
+plot_microshades(mdf_marsh, cdf_marsh) +
+  facet_grid(~Treatment, scales = "free", space = "free") +
+  theme_few() +
+  theme(axis.text = element_text(color = "black", size = 11),
+        axis.text.x = element_text(angle = 90))
+
+# bar plot using ggplot2
+ps.list.fix.gen$marsh %>% filter(Abundance > 0.01) %>%
+  ggplot(aes(x = sample_id, y = Abundance, fill = Order)) + 
+  facet_grid(~Treatment, scales="free", space="free") +
+  geom_bar(stat = "identity") +
+  scale_fill_manual(values = distinctColorPalette(49)) +
+  theme_few() +
+  theme(legend.position="bottom") +
+  ggtitle("Marsh: ASVs >1%")
+
+```
+
+3. saltmarsh
+```{r}
+# extract saltmarsh ps 
+# remove technical duplicates to reduce plot complexity
+ps.saltmarsh.fix.gen = ps.list.fix.gen$saltmarsh %>% 
+  filter(!Sample %in% c("AS22", "AS10", "AS8"))
+
+# create color object for selected taxa
+color_obj_saltmarsh = create_color_dfs(ps.saltmarsh.fix.gen, selected_groups = c("Bacteroidota", "Desulfobacterota", "Firmicutes", "Proteobacteria",  "Euryarchaeota"), cvd = TRUE)
+
+# extract plot objects
+mdf_saltmarsh = color_obj_saltmarsh$mdf
+cdf_saltmarsh = color_obj_saltmarsh$cdf
+
+# fix variable levels before plotting
+mdf_saltmarsh$Treatment = factor(mdf_saltmarsh$Treatment, aes("Initial", "Oxygen-shifted", "Anoxic"))
+
+mdf_saltmarsh$Sample = factor(mdf_saltmarsh$Sample, levels=c("S0", "AS0", "S22", "S23", "S16", "S17", "S18", "S13", "S10", "S11", "S12", "S7", "S8", "S9", "S5", "S6", "S2"))
+
+# bar plot using microshades
+plot_microshades(mdf_saltmarsh, cdf_saltmarsh) +
+  facet_grid(~Treatment, scales = "free", space = "free")
+
+# bar plot using ggplot2
+ps.list.fix.gen$saltmarsh %>% filter(Abundance > 0.01) %>%
+  filter(!Sample %in% c("AS22", "AS10", "AS8")) %>%
+  ggplot(aes(x = sample_id, y = Abundance, fill = reorder(Order, Phylum))) + 
+  facet_grid(~Treatment, scales="free", space="free") +
+  geom_bar(stat = "identity") +
+  scale_fill_manual(values = distinctColorPalette(35)) +
+  theme_few() +
+  theme(legend.position="right") +
+  guides(fill=guide_legend(ncol=3))
+  ggtitle("Saltmarsh: ASVs >0.1%")
+
+```
+
+
+Bar plots of archaea
+```{r}
+ps.list.fix.gen$peat %>%
+  filter(Kingdom == "Archaea") %>%
+  ggplot(aes(x = sample_id, y = Abundance, fill = Class)) + 
+  facet_grid(~Treatment, scales="free", space = "free") +
+  geom_bar(stat = "identity") +
+  scale_fill_manual(values = distinctColorPalette(11)) +
+  theme_few() +
+  theme(legend.position="bottom") +
+  guides(fill=guide_legend(ncol=3))
+```
+
+Bar plots of putative methanotrophs
+```{r}
+# Gammaproteobacteria (Methylococcaceae and Methylothermaceae), Alphaproteobacteria (Methylocystaceae and Beijerinckiaceae), and Verrucomicrobia (family Methylacidiphilaceae) 
+# others: methyloligellaceae, methylomonadaceae, methylophagaceae, methylophilaceae
+
+# 2 orders in peat, marsh: methylacidiphilales (verruco) and methylococcales (gamma)
+# only methylococcales in saltmarsh
+
+ps.list.fix.gen$peat %>%
+  # filter(Class %in% c("Alphaproteobacteria", "Gammaproteobacteria") | Phylum == "Verrucomicrobiota") %>%
+  filter(Family %in% c("Methylococcaceae", "Methylothermaceae", "Methylocystaceae","Beijerinckiaceae", "Methylacidiphilaceae", "Methyloligellaceae", "Methylomonadaceae", "Methylophagaceae", "Methylophilaceae")) %>%
+  ggplot(aes(x = sample_id, y = Abundance, fill = Family)) + 
+  facet_grid(~Treatment, scales="free", space = "free") +
+  geom_bar(stat = "identity") +
+  # scale_fill_manual(values = distinctColorPalette(121)) +
+  scale_fill_manual(values = distinctColorPalette(6)) +
+  theme_few() +
+  theme(legend.position="bottom")
+```
+
+Bar plots of sphingomonadales and acidobacteria, for comparing with Ward peat microbiome:
+## FIGURE S4
+```{r}
+# S4
+ps.list.fix.gen$peat %>%
+  filter(Order %in% c("Sphingomonadales", "Holophagales")) %>%
+  # filter(Order == "Sphingomonadales" | Phylum == "Acidobacteriota") %>%
+  ggplot(aes(x = sample_id, y = Abundance, fill = Genus )) + 
+  facet_grid(~Treatment, scales="free", space = "free") +
+  geom_bar(stat = "identity") +
+  scale_fill_manual(values = distinctColorPalette(8)) +
+  theme_few() +
+  theme(legend.position="bottom") +
+  theme(axis.text.x = element_text(angle=90))
+
+ps.list.fix.gen$saltmarsh %>%
+  filter(Phylum == "Acidobacteriota") %>%
+  ggplot(aes(x = sample_id, y = Abundance, fill = Genus)) + 
+  facet_grid(~Treatment, scales="free", space = "free") +
+  geom_bar(stat = "identity") +
+  scale_fill_manual(values = distinctColorPalette(26)) +
+  theme_few() +
+  theme(legend.position="bottom")
+```
+
+
+## Differential abundance testing using ANCOM-BC
+
+### ANCOM peat
+```{r}
+# peat: filter taxa(ASVs) rel abu of at least 1%
+ps.peat.fix.genus = tax_glom((ps.list.fix$peat %>% tax_filter(min_sample_abundance = 0.01, min_prevalence = 0.2)), taxrank = "Genus")
+ps.peat.fix.order = tax_glom((ps.list.fix$peat %>% tax_filter(min_sample_abundance = 0.01, min_prevalence = 0.2)), taxrank = "Order")
+ps.peat.fix.phylum = tax_glom((ps.list.fix$peat %>% tax_filter(min_sample_abundance = 0.01, min_prevalence = 0.2)), taxrank = "Phylum")
+
+# ANCOMBC on Genus peat
+ps.peat.genus.ancombc1 = ancombc((ps.peat.fix.genus %>% ps_filter(Treatment != "Initial")), formula = "Treatment+Timepoint", p_adj_method = "fdr", struc_zero = TRUE, neg_lb = TRUE, group = "Treatment", conserve = TRUE, max_iter=100, global=TRUE)
+which(ps.peat.genus.ancombc1$res$diff_abn == TRUE)
+
+# ANCOMBC on order peat
+ps.peat.order.ancombc = ancombc((ps.peat.fix.order %>% ps_filter(Treatment != "Initial")), formula = "Treatment", p_adj_method = "fdr", struc_zero = TRUE, neg_lb = TRUE, group = "Treatment", conserve = TRUE, max_iter=100, global=TRUE)
+which(ps.peat.order.ancombc$res$diff_abn == TRUE)
+
+# ANCOMBC on phylum peat
+ps.peat.phyl.ancombc = ancombc((ps.peat.fix.phylum %>% ps_filter(Treatment != "Initial")), formula = "Timepoint + Treatment", p_adj_method = "fdr", struc_zero = TRUE, neg_lb = TRUE, group = "Treatment", conserve = TRUE, max_iter=100, global=TRUE)
+which(ps.peat.phyl.ancombc$res$diff_abn==TRUE)
+```
+
+Plot fold changes for differentially abundant ASVs (peat, Genus-level):
+```{r}
+# fold changes
+peat.gen.lfc = ps.peat.genus.ancombc1$res$beta
+# differentially abundant taxa
+peat.gen.diff = ps.peat.genus.ancombc1$res$diff_abn
+
+# multiplying with TRUE or FALSE converts non-DE values to zero
+peat.gen.lfc.df = data.frame(peat.gen.lfc * peat.gen.diff, check.names = FALSE) %>%
+    mutate(taxon_id = rownames(peat.gen.diff))
+
+peat.gen.df.se = data.frame(ps.peat.genus.ancombc1$res$se * peat.gen.diff, 
+                            check.names = FALSE) %>% mutate(taxon_id = rownames(peat.gen.diff))
+
+peat.gen.df.q = data.frame(ps.peat.genus.ancombc1$res$q_val * peat.gen.diff, check.names = FALSE) %>% mutate(taxon_id = rownames(peat.gen.diff))
+
+# change colnames
+colnames(peat.gen.df.se)[-5] = paste0(colnames(peat.gen.df.se)[-5], "SE")
+colnames(peat.gen.df.q)[-5] = paste0(colnames(peat.gen.df.q)[-5], "q")
+head.matrix(peat.gen.lfc.df)
+head(peat.gen.df.se)
+
+# diff
+# prep data for plotting
+
+# add SE values to fold change values; filter out q-val > 0.001
+peat.gen.df.treatFig = peat.gen.lfc.df %>% 
+  left_join(peat.gen.df.se, by = "taxon_id") %>%
+  transmute(taxon_id, `TreatmentOxygen-shifted`, `TreatmentOxygen-shiftedSE`) %>%
+  filter(`TreatmentOxygen-shifted` != 0) %>% 
+  arrange(desc(`TreatmentOxygen-shifted`)) %>%
+  mutate(direct = ifelse(`TreatmentOxygen-shifted` > 0, "Positive LFC", "Negative LFC")) %>%
+  left_join(peat.gen.df.q, by = "taxon_id") %>%
+  transmute(taxon_id, `TreatmentOxygen-shifted`, `TreatmentOxygen-shiftedSE`, direct, `TreatmentOxygen-shiftedq`) %>%
+  filter(`TreatmentOxygen-shiftedq` < 0.001)
+
+dim(peat.gen.df.treatFig)
+
+# get genus annotations
+## diff abu taxa at genus level
+peat.de.gen = peat.gen.df.treatFig$taxon_id
+## get tax annotations for diff abu taxa
+peat.de.gen.tax = ps_melt(ps.peat.fix.genus) %>%
+  select(OTU, Genus, Order, Phylum) %>%
+  filter(OTU %in% peat.de.gen) %>%
+  filter(duplicated(OTU) == FALSE)
+colnames(peat.de.gen.tax)[1] = "taxon_id" 
+## add tax annotations to the plotting data
+peat.gen.df.treatFig = peat.gen.df.treatFig %>%
+  left_join(peat.de.gen.tax, by = "taxon_id")
+
+dim(peat.gen.df.treatFig)
+
+# DE plot
+ggplot(data = peat.gen.df.treatFig,
+           aes(x = reorder(Genus, `TreatmentOxygen-shifted`), y = `TreatmentOxygen-shifted`, fill = Phylum, color = Phylum)) + 
+  geom_bar(stat = "identity", width = 0.7, 
+           position = position_dodge(width = 0.4)) +
+  geom_errorbar(aes(ymin = `TreatmentOxygen-shifted` - `TreatmentOxygen-shiftedSE`, ymax = `TreatmentOxygen-shifted` + `TreatmentOxygen-shiftedSE`), width = 0.2,
+                position = position_dodge(0.05), color = "black") + 
+  scale_fill_discrete_diverging(palette = "Red-Green") +
+  scale_color_discrete_diverging("Red-Green") +
+  labs(x = NULL, y = "Log fold change") + 
+  theme_bw() + 
+  theme(panel.grid.minor.y = element_blank(),
+        axis.text.x = element_text(angle = 90, hjust = 1, vjust=0.5))
+```
+
+
+
+
+### ANCOM saltmarsh
+```{r}
+# filter taxa(ASVs) that have at least 5 reads in 1 or more of the samples
+ps.saltmarsh.fix.genus = tax_glom((ps.list.fix$saltmarsh %>% tax_filter(min_sample_abundance = 0.01, min_prevalence = 0.2)), taxrank = "Genus")
+ps.saltmarsh.fix.order = tax_glom((ps.list.fix$saltmarsh %>% tax_filter(min_sample_abundance = 0.01, min_prevalence = 0.2)), taxrank = "Order")
+ps.saltmarsh.fix.phylum = tax_glom((ps.list.fix$saltmarsh %>% tax_filter(min_sample_abundance = 0.01, min_prevalence = 0.2)), taxrank = "Phylum")
+
+# ANCOMBC on Genus saltmarsh
+ps.saltmarsh.genus.ancombc1 = ancombc((ps.saltmarsh.fix.genus %>% ps_filter(Treatment != "Initial")), formula = "Treatment+Timepoint", p_adj_method = "fdr", struc_zero = TRUE, neg_lb = TRUE, group = "Treatment", conserve = TRUE, max_iter=100, global=TRUE)
+which(ps.saltmarsh.genus.ancombc1$res$diff_abn == TRUE)
+
+# ANCOMBC on order saltmarsh
+ps.saltmarsh.order.ancombc = ancombc((ps.saltmarsh.fix.order %>% ps_filter(Treatment != "Initial")), formula = "Treatment+Timepoint", p_adj_method = "fdr", struc_zero = TRUE, neg_lb = TRUE, group = "Treatment", conserve = TRUE, max_iter=100, global=TRUE)
+which(ps.saltmarsh.order.ancombc$res$diff_abn == TRUE)
+
+# ANCOMBC on phylum saltmarsh
+ps.saltmarsh.phyl.ancombc = ancombc((ps.saltmarsh.fix.phylum %>% ps_filter(Treatment != "Initial")), formula = "Treatment", p_adj_method = "fdr", struc_zero = TRUE, neg_lb = TRUE, group = "Treatment", conserve = TRUE, max_iter=100, global=TRUE)
+which(ps.saltmarsh.phyl.ancombc$res$diff_abn==TRUE)
+```
+
+Plot fold changes for differentially abundant ASVs (saltmarsh, Genus-level):
+```{r}
+# fold changes
+saltmarsh.gen.lfc = ps.saltmarsh.genus.ancombc1$res$beta
+# differentially abundant taxa
+saltmarsh.gen.diff = ps.saltmarsh.genus.ancombc1$res$diff_abn
+
+# multiplying with TRUE or FALSE converts non-DE values to zero
+saltmarsh.gen.lfc.df = data.frame(saltmarsh.gen.lfc * saltmarsh.gen.diff, check.names = FALSE) %>%
+    mutate(taxon_id = rownames(saltmarsh.gen.diff))
+
+saltmarsh.gen.df.se = data.frame(ps.saltmarsh.genus.ancombc1$res$se * saltmarsh.gen.diff, 
+                            check.names = FALSE) %>% mutate(taxon_id = rownames(saltmarsh.gen.diff))
+
+saltmarsh.gen.df.q = data.frame(ps.saltmarsh.genus.ancombc1$res$q_val * saltmarsh.gen.diff, check.names = FALSE) %>% mutate(taxon_id = rownames(saltmarsh.gen.diff))
+
+# change colnames
+colnames(saltmarsh.gen.df.se)[-5] = paste0(colnames(saltmarsh.gen.df.se)[-5], "SE")
+colnames(saltmarsh.gen.df.q)[-5] = paste0(colnames(saltmarsh.gen.df.q)[-5], "q")
+
+# prep data for plotting
+
+# add SE values to fold change values; filter out q-val > 0.001
+saltmarsh.gen.df.treatFig = saltmarsh.gen.lfc.df %>% 
+  left_join(saltmarsh.gen.df.se, by = "taxon_id") %>%
+  transmute(taxon_id, `TreatmentOxygen-shifted`, `TreatmentOxygen-shiftedSE`) %>%
+  filter(`TreatmentOxygen-shifted` != 0) %>% 
+  arrange(desc(`TreatmentOxygen-shifted`)) %>%
+  mutate(direct = ifelse(`TreatmentOxygen-shifted` > 0, "Positive LFC", "Negative LFC")) %>%
+  left_join(saltmarsh.gen.df.q, by = "taxon_id") %>%
+  transmute(taxon_id, `TreatmentOxygen-shifted`, `TreatmentOxygen-shiftedSE`, direct, `TreatmentOxygen-shiftedq`) %>%
+  filter(`TreatmentOxygen-shiftedq` < 0.001)
+
+dim(saltmarsh.gen.df.treatFig)
+
+# get genus annotations
+## diff abu taxa at genus level
+saltmarsh.de.gen = saltmarsh.gen.df.treatFig$taxon_id
+length(saltmarsh.de.gen)
+## get tax annotations for diff abu taxa
+saltmarsh.de.gen.tax = ps_melt(ps.saltmarsh.fix.genus) %>%
+  select(OTU, Genus, Order, Phylum) %>%
+  filter(OTU %in% saltmarsh.de.gen) %>%
+  filter(duplicated(OTU) == FALSE)
+colnames(saltmarsh.de.gen.tax)[1] = "taxon_id" 
+## add tax annotations to the plotting data
+saltmarsh.gen.df.treatFig = saltmarsh.gen.df.treatFig %>%
+  left_join(saltmarsh.de.gen.tax, by = "taxon_id")
+
+# DE plot
+ggplot(data = saltmarsh.gen.df.treatFig,
+           aes(x = reorder(Genus, `TreatmentOxygen-shifted`), y = `TreatmentOxygen-shifted`, fill = Phylum)) + 
+  geom_bar(stat = "identity", width = 0.7, 
+           position = position_dodge(width = 0.4)) +
+  geom_errorbar(aes(ymin = `TreatmentOxygen-shifted` - `TreatmentOxygen-shiftedSE`, ymax = `TreatmentOxygen-shifted` + `TreatmentOxygen-shiftedSE`), width = 0.2,
+                position = position_dodge(0.05), color = "black") + 
+  labs(x = NULL, y = "Log fold change") + 
+  theme_bw() + 
+  theme(panel.grid.minor.y = element_blank(),
+        axis.text.x = element_text(angle = 90, hjust = 1, vjust=0.5))
+
+# for clarity, filter out taxa with abs(fold change) >= 2
+saltmarsh.gen.df.treatFig %>%
+  filter(abs(`TreatmentOxygen-shifted`) >= 2) %>%
+  ggplot(aes(x = reorder(Genus, `TreatmentOxygen-shifted`), y = `TreatmentOxygen-shifted`, fill = Phylum, color = Phylum)) + 
+  geom_bar(stat = "identity", width = 0.7, 
+           position = position_dodge(width = 0.4)) +
+  geom_errorbar(aes(ymin = `TreatmentOxygen-shifted` - `TreatmentOxygen-shiftedSE`, ymax = `TreatmentOxygen-shifted` + `TreatmentOxygen-shiftedSE`), width = 0.2,
+                position = position_dodge(0.05), color = "black") + 
+  scale_fill_discrete_diverging(palette = "Tropic") +
+  scale_color_discrete_diverging(palette = "Tropic") +
+  labs(x = NULL, y = "Log fold change") + 
+  theme_bw() + 
+  theme(panel.grid.minor.y = element_blank(),
+        axis.text.x = element_text(angle = 90, hjust = 1, vjust=0.5))
+```
+
+
+
+### ANCOM Marsh
+```{r}
+# filter taxa(ASVs) that have at least 5 reads in 1 or more of the samples
+ps.marsh.fix.genus = tax_glom((ps.list.fix$marsh %>% tax_filter(min_sample_abundance = 0.01, min_prevalence = 0.2)), taxrank = "Genus")
+ps.marsh.fix.order = tax_glom((ps.list.fix$marsh %>% tax_filter(min_sample_abundance = 0.01, min_prevalence = 0.2)), taxrank = "Order")
+ps.marsh.fix.phylum = tax_glom((ps.list.fix$marsh %>% tax_filter(min_sample_abundance = 0.01, min_prevalence = 0.2)), taxrank = "Phylum")
+
+# ANCOMBC on Genus saltmarsh
+ps.marsh.genus.ancombc = ancombc((ps.marsh.fix.genus %>% ps_filter(Treatment != "Initial")), formula = "Treatment+Timepoint", p_adj_method = "fdr", struc_zero = TRUE, neg_lb = TRUE, group = "Treatment", conserve = TRUE, max_iter=100, global=TRUE)
+which(ps.marsh.genus.ancombc$res$diff_abn == TRUE)
+
+# ANCOMBC on order saltmarsh
+ps.marsh.order.ancombc = ancombc((ps.marsh.fix.order %>% ps_filter(Treatment != "Initial")), formula = "Treatment+Timepoint", p_adj_method = "fdr", struc_zero = TRUE, neg_lb = TRUE, group = "Treatment", conserve = TRUE, max_iter=100, global=TRUE)
+which(ps.marsh.order.ancombc$res$diff_abn == TRUE)
+
+# ANCOMBC on phylum saltmarsh
+ps.marsh.phyl.ancombc = ancombc((ps.marsh.fix.phylum %>% ps_filter(Treatment != "Initial")), formula = "Treatment", p_adj_method = "fdr", struc_zero = TRUE, neg_lb = TRUE, group = "Treatment", conserve = TRUE, max_iter=100, global=TRUE)
+which(ps.marsh.phyl.ancombc$res$diff_abn==TRUE)
+```
+
+### marsh Genus level
+```{r}
+# fold changes
+marsh.gen.lfc = ps.marsh.genus.ancombc$res$beta
+# differentially abundant taxa
+marsh.gen.diff = ps.marsh.genus.ancombc$res$diff_abn
+
+# multiplying with TRUE or FALSE converts non-DE values to zero
+marsh.gen.lfc.df = data.frame(marsh.gen.lfc * marsh.gen.diff, check.names = FALSE) %>%
+    mutate(taxon_id = rownames(marsh.gen.diff))
+
+marsh.gen.df.se = data.frame(ps.marsh.genus.ancombc$res$se * marsh.gen.diff, check.names = FALSE) %>% mutate(taxon_id = rownames(marsh.gen.diff))
+
+marsh.gen.df.q = data.frame(ps.marsh.genus.ancombc$res$q_val * marsh.gen.diff, check.names = FALSE) %>% mutate(taxon_id = rownames(marsh.gen.diff))
+
+# change colnames
+colnames(marsh.gen.df.se)[-5] = paste0(colnames(marsh.gen.df.se)[-5], "SE")
+colnames(marsh.gen.df.q)[-5] = paste0(colnames(marsh.gen.df.q)[-5], "q")
+
+# prep data for plotting
+# add SE values to fold change values; filter out q-val > 0.001
+marsh.gen.df.treatFig = marsh.gen.lfc.df %>% 
+  left_join(marsh.gen.df.se, by = "taxon_id") %>%
+  transmute(taxon_id, `TreatmentOxygen-shifted`, `TreatmentOxygen-shiftedSE`) %>%
+  filter(`TreatmentOxygen-shifted` != 0) %>% 
+  arrange(desc(`TreatmentOxygen-shifted`)) %>%
+  mutate(direct = ifelse(`TreatmentOxygen-shifted` > 0, "Positive LFC", "Negative LFC")) %>%
+  left_join(marsh.gen.df.q, by = "taxon_id") %>%
+  transmute(taxon_id, `TreatmentOxygen-shifted`, `TreatmentOxygen-shiftedSE`, direct, `TreatmentOxygen-shiftedq`) %>%
+  filter(`TreatmentOxygen-shiftedq` < 0.001)
+
+dim(marsh.gen.df.treatFig)
+
+# get genus annotations
+## diff abu taxa at genus level
+marsh.de.gen = marsh.gen.df.treatFig$taxon_id
+length(marsh.de.gen)
+## get tax annotations for diff abu taxa
+marsh.de.gen.tax = ps_melt(ps.marsh.fix.genus) %>%
+  select(OTU, Genus, Order, Phylum) %>%
+  filter(OTU %in% marsh.de.gen) %>%
+  filter(duplicated(OTU) == FALSE)
+colnames(marsh.de.gen.tax)[1] = "taxon_id" 
+## add tax annotations to the plotting data
+marsh.gen.df.treatFig = marsh.gen.df.treatFig %>%
+  left_join(marsh.de.gen.tax, by = "taxon_id")
+
+# DE plot
+ggplot(data = marsh.gen.df.treatFig, aes(x = reorder(Genus, `TreatmentOxygen-shifted`), y = `TreatmentOxygen-shifted`, fill = Phylum)) + 
+  geom_bar(stat = "identity", width = 0.7, position = position_dodge(width = 0.4)) +
+  geom_errorbar(aes(ymin = `TreatmentOxygen-shifted` - `TreatmentOxygen-shiftedSE`, ymax = `TreatmentOxygen-shifted` + `TreatmentOxygen-shiftedSE`), width = 0.2, position = position_dodge(0.05), color = "black") + 
+  scale_fill_discrete_diverging(palette = "Tropic") +
+  scale_color_discrete_diverging(palette = "Tropic") +
+  labs(x = NULL, y = "Log fold change") + 
+  theme_bw() + 
+  theme(panel.grid.minor.y = element_blank(),
+        axis.text.x = element_text(angle = 90, hjust = 1, vjust=0.5))
+
+# for clarity, filter out taxa with abs(fold change) >= 0.5
+marsh.gen.df.treatFig %>%
+  filter(abs(`TreatmentOxygen-shifted`) >= 0.5) %>%
+  ggplot(aes(x = reorder(Genus, `TreatmentOxygen-shifted`), y = `TreatmentOxygen-shifted`, fill = Phylum, color = Phylum)) + 
+  geom_bar(stat = "identity", width = 0.7, position = position_dodge(width = 0.4)) +
+  geom_errorbar(aes(ymin = `TreatmentOxygen-shifted` - `TreatmentOxygen-shiftedSE`, ymax = `TreatmentOxygen-shifted` + `TreatmentOxygen-shiftedSE`), width = 0.2, position = position_dodge(0.05), color = "black") + 
+  scale_fill_discrete_diverging(palette = "Tropic") +
+  scale_color_discrete_diverging(palette = "Tropic") +
+  labs(x = NULL, y = "Log fold change") + 
+  theme_bw() + 
+  theme(panel.grid.minor.y = element_blank(),
+        axis.text.x = element_text(angle = 90, hjust = 1, vjust=0.5))
+```
+
+
+
